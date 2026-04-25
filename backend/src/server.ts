@@ -1,18 +1,11 @@
-// src/server.ts
-import fastify from 'fastify';
+import { buildApp } from "./app"
 
-const app = fastify();
+const app = buildApp()
 
-app.get('/api/health', async () => {
-    return { status: 'healthy' };
-});
-
-const PORT = parseInt(process.env.PORT || '3001', 10);
-
-app.listen({ port: PORT }, (err, address) => {
+app.listen({ port: 4000 }, (err) => {
     if (err) {
-        console.error(err);
-        process.exit(1);
+        app.log.error(err)
+        process.exit(1)
     }
-    console.log(`Server is running on port ${PORT}`);
-});
+    console.log("Server running on http://localhost:4000")
+})
