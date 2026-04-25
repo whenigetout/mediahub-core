@@ -21,6 +21,22 @@ export type LibraryItem = {
     lastScannedAt: string
 }
 
+export type SearchParams = {
+    q?: string
+    actress?: string
+    tag?: string
+    includeTags?: string[]
+    excludeTags?: string[]
+    studio?: string
+    code?: string
+    metadataStatus?: string
+    yearFrom?: number
+    yearTo?: number
+    sort?: SearchSort
+    limit?: number
+    offset?: number
+}
+
 export type SearchResponse = {
     items: LibraryItem[]
     total: number
@@ -75,4 +91,24 @@ export type LibraryScanJobStatus = {
     finishedAt: string | null
     error: string | null
     summary: ScanSummary | null
+}
+
+export type SearchPreset = {
+    id: string
+    name: string
+    params: SearchParams
+    createdAt: string
+    updatedAt: string
+}
+
+export type SearchPresetsResponse = {
+    presets: SearchPreset[]
+}
+
+export type NaturalLanguageSearchResponse = {
+    parsed: SearchParams
+    aiUsed: boolean
+    interpretation: string
+    warning: string | null
+    result: SearchResponse
 }

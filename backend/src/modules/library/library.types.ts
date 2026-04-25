@@ -2,6 +2,8 @@ export type LibrarySearchParams = {
     q?: string
     actress?: string
     tag?: string
+    includeTags?: string[]
+    excludeTags?: string[]
     studio?: string
     code?: string
     metadataStatus?: string
@@ -59,6 +61,27 @@ export type ScanSummary = {
 export type LibrarySuggestion = {
     value: string
     kind: "title" | "code" | "actress" | "tag" | "studio"
+}
+
+export type SearchPreset = {
+    id: string
+    name: string
+    params: LibrarySearchParams
+    createdAt: string
+    updatedAt: string
+}
+
+export type CreateSearchPresetInput = {
+    name: string
+    params: LibrarySearchParams
+}
+
+export type NaturalLanguageSearchResponse = {
+    parsed: LibrarySearchParams
+    aiUsed: boolean
+    interpretation: string
+    warning: string | null
+    result: LibrarySearchResult
 }
 
 export type LibraryScanJobStatus = {

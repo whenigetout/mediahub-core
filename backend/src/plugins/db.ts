@@ -17,6 +17,14 @@ const initializeSchema = (db: Database.Database) => {
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS search_preset (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            params_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE TABLE IF NOT EXISTS library_item (
             id TEXT PRIMARY KEY,
             media_file_id TEXT NOT NULL UNIQUE,

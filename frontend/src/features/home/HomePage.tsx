@@ -8,10 +8,12 @@ import {
     LibraryScanJobStatus,
     LibraryStats,
     LibrarySuggestion,
+    NaturalLanguageSearchResponse,
     ScanSummary,
+    SearchPreset,
+    SearchPresetsResponse,
     SearchResponse,
     SearchSort,
-    SuggestionsResponse,
 } from "./types"
 
 const backendOrigin =
@@ -38,7 +40,6 @@ const idleScanJob: LibraryScanJobStatus = {
 
 type FiltersState = {
     actress: string
-    tag: string
     studio: string
     code: string
     metadataStatus: string
@@ -46,11 +47,12 @@ type FiltersState = {
     yearTo: string
     sort: SearchSort
     pageSize: number
+    includeTags: string[]
+    excludeTags: string[]
 }
 
 const defaultFilters: FiltersState = {
     actress: "",
-    tag: "",
     studio: "",
     code: "",
     metadataStatus: "",
@@ -58,6 +60,8 @@ const defaultFilters: FiltersState = {
     yearTo: "",
     sort: "relevance",
     pageSize: 24,
+    includeTags: [],
+    excludeTags: [],
 }
 
 const getProgressPercent = (scanJob: LibraryScanJobStatus) => {
@@ -70,6 +74,9 @@ const getProgressPercent = (scanJob: LibraryScanJobStatus) => {
         Math.round((scanJob.processedFiles / scanJob.totalFiles) * 100)
     )
 }
+
+const uniq = (values: string[]) =>
+    Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)))
 
 export const HomePage = () => {
     const [query, setQuery] = useState("")
@@ -85,11 +92,19 @@ export const HomePage = () => {
     const [scanSummary, setScanSummary] = useState<ScanSummary | null>(null)
     const [scanJob, setScanJob] = useState<LibraryScanJobStatus>(idleScanJob)
     const [filters, setFilters] = useState<FiltersState>(defaultFilters)
+    const [tagInput, setTagInput] = useState("")
+    const [excludeTagInput, setExcludeTagInput] = useState("")
     const [page, setPage] = useState(1)
     const [totalResults, setTotalResults] = useState(0)
     const [suggestions, setSuggestions] = useState<LibrarySuggestion[]>([])
+    const [presets, setPresets] = useState<SearchPreset[]>([])
+    const [presetName, setPresetName] = useState("")
+    const [naturalInput, setNaturalInput] = useState("")
+    const [naturalMessage, setNaturalMessage] = useState("")
     const [isSearching, startSearchTransition] = useTransition()
     const [isScanning, startScanTransition] = useTransition()
+    const [isSavingPreset, startPresetTransition] = useTransition()
+    const [isNaturalSearching, startNaturalTransition] = useTransition()
 
     const parsedRoots = useMemo(
         () =>
@@ -101,6 +116,25 @@ export const HomePage = () => {
     )
 
     const pageCount = Math.max(1, Math.ceil(totalResults / filters.pageSize))
+
+    const currentSearchParams = {
+        q: debouncedQuery.trim() || undefined,
+        actress: filters.actress.trim() || undefined,
+        studio: filters.studio.trim() || undefined,
+        code: filters.code.trim() || undefined,
+        metadataStatus: filters.metadataStatus.trim() || undefined,
+        yearFrom: filters.yearFrom.trim()
+            ? Number.parseInt(filters.yearFrom, 10)
+            : undefined,
+        yearTo: filters.yearTo.trim()
+            ? Number.parseInt(filters.yearTo, 10)
+            : undefined,
+        sort: filters.sort,
+        limit: filters.pageSize,
+        offset: (page - 1) * filters.pageSize,
+        includeTags: filters.includeTags,
+        excludeTags: filters.excludeTags,
+    }
 
     const refreshRoots = async () => {
         const response = await fetch("/api/library/roots", { cache: "no-store" })
@@ -115,6 +149,12 @@ export const HomePage = () => {
         const response = await fetch("/api/library/stats", { cache: "no-store" })
         const payload = (await response.json()) as LibraryStats
         setStats(payload)
+    }
+
+    const refreshPresets = async () => {
+        const response = await fetch("/api/library/presets", { cache: "no-store" })
+        const payload = (await response.json()) as SearchPresetsResponse
+        setPresets(payload.presets)
     }
 
     const refreshScanJob = async () => {
@@ -137,7 +177,35 @@ export const HomePage = () => {
         }
     }
 
-    const runSearch = (overrides?: Partial<FiltersState> & { query?: string; page?: number }) => {
+    const applySearchResponse = (
+        payload: SearchResponse,
+        nextPage: number,
+        nextMessage?: string
+    ) => {
+        setResults(payload.items)
+        setTotalResults(payload.total)
+        setPage(nextPage)
+        setSelectedVideo((current) => {
+            if (current && payload.items.some((item) => item.id === current.id)) {
+                return payload.items.find((item) => item.id === current.id) ?? current
+            }
+
+            return payload.items[0] ?? null
+        })
+        setStatusMessage(
+            nextMessage ??
+                (payload.total
+                    ? `Showing page ${nextPage} of ${Math.max(
+                          1,
+                          Math.ceil(payload.total / payload.limit)
+                      )}. ${payload.total} indexed videos matched.`
+                    : "No indexed videos matched that search yet.")
+        )
+    }
+
+    const runSearch = (
+        overrides?: Partial<FiltersState> & { query?: string; page?: number }
+    ) => {
         const nextQuery = overrides?.query ?? debouncedQuery
         const nextPage = overrides?.page ?? page
         const nextFilters = {
@@ -151,9 +219,8 @@ export const HomePage = () => {
                 params.set("q", nextQuery.trim())
             }
 
-            const filterEntries: Array<[string, string]> = [
+            const scalarEntries: Array<[string, string]> = [
                 ["actress", nextFilters.actress],
-                ["tag", nextFilters.tag],
                 ["studio", nextFilters.studio],
                 ["code", nextFilters.code],
                 ["metadataStatus", nextFilters.metadataStatus],
@@ -162,10 +229,18 @@ export const HomePage = () => {
                 ["sort", nextFilters.sort],
             ]
 
-            for (const [key, value] of filterEntries) {
+            for (const [key, value] of scalarEntries) {
                 if (value.trim()) {
                     params.set(key, value.trim())
                 }
+            }
+
+            if (nextFilters.includeTags.length) {
+                params.set("includeTags", nextFilters.includeTags.join(","))
+            }
+
+            if (nextFilters.excludeTags.length) {
+                params.set("excludeTags", nextFilters.excludeTags.join(","))
             }
 
             params.set("limit", String(nextFilters.pageSize))
@@ -176,25 +251,8 @@ export const HomePage = () => {
             })
             const payload = (await response.json()) as SearchResponse
 
-            setResults(payload.items)
-            setTotalResults(payload.total)
-            setPage(nextPage)
             setFilters(nextFilters)
-            setSelectedVideo((current) => {
-                if (current && payload.items.some((item) => item.id === current.id)) {
-                    return payload.items.find((item) => item.id === current.id) ?? current
-                }
-
-                return payload.items[0] ?? null
-            })
-            setStatusMessage(
-                payload.total
-                    ? `Showing page ${nextPage} of ${Math.max(
-                          1,
-                          Math.ceil(payload.total / payload.limit)
-                      )}. ${payload.total} indexed videos matched.`
-                    : "No indexed videos matched that search yet."
-            )
+            applySearchResponse(payload, nextPage)
         })
     }
 
@@ -208,7 +266,7 @@ export const HomePage = () => {
             `/api/library/suggestions?q=${encodeURIComponent(value.trim())}`,
             { cache: "no-store" }
         )
-        const payload = (await response.json()) as SuggestionsResponse
+        const payload = (await response.json()) as { suggestions: LibrarySuggestion[] }
         setSuggestions(payload.suggestions)
     }
 
@@ -232,7 +290,9 @@ export const HomePage = () => {
                 return
             }
 
-            setStatusMessage("Scan started. Building a fresh index from your selected roots...")
+            setStatusMessage(
+                "Scan started. Building a fresh index from your selected roots..."
+            )
         })
     }
 
@@ -247,6 +307,324 @@ export const HomePage = () => {
         )
     }
 
+    const addIncludeTag = (value: string) => {
+        const normalized = value.trim()
+        if (!normalized) {
+            return
+        }
+
+        setFilters((current) => ({
+            ...current,
+            includeTags: uniq([...current.includeTags, normalized]),
+            excludeTags: current.excludeTags.filter(
+                (tag) => tag.toLowerCase() !== normalized.toLowerCase()
+            ),
+        }))
+        setTagInput("")
+    }
+
+    const addExcludeTag = (value: string) => {
+        const normalized = value.trim()
+        if (!normalized) {
+            return
+        }
+
+        setFilters((current) => ({
+            ...current,
+            excludeTags: uniq([...current.excludeTags, normalized]),
+            includeTags: current.includeTags.filter(
+                (tag) => tag.toLowerCase() !== normalized.toLowerCase()
+            ),
+        }))
+        setExcludeTagInput("")
+    }
+
+    const removeChip = (kind: string, value?: string) => {
+        setPage(1)
+        setNaturalMessage("")
+        setFilters((current) => {
+            switch (kind) {
+                case "query":
+                    setQuery("")
+                    setDebouncedQuery("")
+                    return current
+                case "actress":
+                    return { ...current, actress: "" }
+                case "studio":
+                    return { ...current, studio: "" }
+                case "code":
+                    return { ...current, code: "" }
+                case "metadata":
+                    return { ...current, metadataStatus: "" }
+                case "yearFrom":
+                    return { ...current, yearFrom: "" }
+                case "yearTo":
+                    return { ...current, yearTo: "" }
+                case "includeTag":
+                    return {
+                        ...current,
+                        includeTags: current.includeTags.filter((tag) => tag !== value),
+                    }
+                case "excludeTag":
+                    return {
+                        ...current,
+                        excludeTags: current.excludeTags.filter((tag) => tag !== value),
+                    }
+                default:
+                    return current
+            }
+        })
+    }
+
+    const activeChips = useMemo(() => {
+        const chips: Array<{ key: string; label: string; kind: string; value?: string }> = []
+        if (debouncedQuery.trim()) {
+            chips.push({
+                key: `query:${debouncedQuery}`,
+                label: `Query: ${debouncedQuery}`,
+                kind: "query",
+            })
+        }
+        if (filters.actress.trim()) {
+            chips.push({
+                key: `actress:${filters.actress}`,
+                label: `Actress: ${filters.actress}`,
+                kind: "actress",
+            })
+        }
+        if (filters.studio.trim()) {
+            chips.push({
+                key: `studio:${filters.studio}`,
+                label: `Studio: ${filters.studio}`,
+                kind: "studio",
+            })
+        }
+        if (filters.code.trim()) {
+            chips.push({
+                key: `code:${filters.code}`,
+                label: `Code: ${filters.code}`,
+                kind: "code",
+            })
+        }
+        if (filters.metadataStatus.trim()) {
+            chips.push({
+                key: `metadata:${filters.metadataStatus}`,
+                label: `Metadata: ${filters.metadataStatus}`,
+                kind: "metadata",
+            })
+        }
+        if (filters.yearFrom.trim()) {
+            chips.push({
+                key: `yearFrom:${filters.yearFrom}`,
+                label: `Year >= ${filters.yearFrom}`,
+                kind: "yearFrom",
+            })
+        }
+        if (filters.yearTo.trim()) {
+            chips.push({
+                key: `yearTo:${filters.yearTo}`,
+                label: `Year <= ${filters.yearTo}`,
+                kind: "yearTo",
+            })
+        }
+        for (const tag of filters.includeTags) {
+            chips.push({
+                key: `include:${tag}`,
+                label: `Tag: ${tag}`,
+                kind: "includeTag",
+                value: tag,
+            })
+        }
+        for (const tag of filters.excludeTags) {
+            chips.push({
+                key: `exclude:${tag}`,
+                label: `Without: ${tag}`,
+                kind: "excludeTag",
+                value: tag,
+            })
+        }
+        return chips
+    }, [debouncedQuery, filters])
+
+    const applyParsedSearch = (
+        parsed: Partial<{
+            q: string
+            actress: string
+            studio: string
+            code: string
+            metadataStatus: string
+            yearFrom: number
+            yearTo: number
+            sort: SearchSort
+            includeTags: string[]
+            excludeTags: string[]
+        }>,
+        payload?: SearchResponse,
+        nextMessage?: string
+    ) => {
+        const nextFilters: FiltersState = {
+            ...defaultFilters,
+            ...filters,
+            actress: parsed.actress ?? "",
+            studio: parsed.studio ?? "",
+            code: parsed.code ?? "",
+            metadataStatus: parsed.metadataStatus ?? "",
+            yearFrom:
+                typeof parsed.yearFrom === "number" ? String(parsed.yearFrom) : "",
+            yearTo: typeof parsed.yearTo === "number" ? String(parsed.yearTo) : "",
+            sort: parsed.sort ?? "relevance",
+            pageSize: filters.pageSize,
+            includeTags: uniq(parsed.includeTags ?? []),
+            excludeTags: uniq(parsed.excludeTags ?? []),
+        }
+
+        const nextQuery = parsed.q ?? ""
+        setQuery(nextQuery)
+        setDebouncedQuery(nextQuery)
+        setFilters(nextFilters)
+        setPage(1)
+
+        if (payload) {
+            applySearchResponse(payload, 1, nextMessage)
+        }
+    }
+
+    const handleSuggestionSelect = (suggestion: LibrarySuggestion) => {
+        setSuggestions([])
+        if (suggestion.kind === "tag") {
+            addIncludeTag(suggestion.value)
+            return
+        }
+
+        if (suggestion.kind === "actress") {
+            setFilters((current) => ({ ...current, actress: suggestion.value }))
+            return
+        }
+
+        if (suggestion.kind === "studio") {
+            setFilters((current) => ({ ...current, studio: suggestion.value }))
+            return
+        }
+
+        if (suggestion.kind === "code") {
+            setFilters((current) => ({ ...current, code: suggestion.value }))
+            return
+        }
+
+        setQuery(suggestion.value)
+        setDebouncedQuery(suggestion.value)
+        void runSearch({ query: suggestion.value, page: 1 })
+    }
+
+    const savePreset = () => {
+        if (!presetName.trim()) {
+            setStatusMessage("Give the preset a name first.")
+            return
+        }
+
+        startPresetTransition(async () => {
+            const response = await fetch("/api/library/presets", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    name: presetName.trim(),
+                    params: {
+                        ...currentSearchParams,
+                    },
+                }),
+            })
+
+            if (!response.ok) {
+                setStatusMessage("Unable to save the preset.")
+                return
+            }
+
+            setPresetName("")
+            await refreshPresets()
+            setStatusMessage("Saved the current search as a preset.")
+        })
+    }
+
+    const loadPreset = (preset: SearchPreset) => {
+        applyParsedSearch(
+            {
+                q: preset.params.q,
+                actress: preset.params.actress,
+                studio: preset.params.studio,
+                code: preset.params.code,
+                metadataStatus: preset.params.metadataStatus,
+                yearFrom: preset.params.yearFrom,
+                yearTo: preset.params.yearTo,
+                sort: preset.params.sort,
+                includeTags: preset.params.includeTags ?? [],
+                excludeTags: preset.params.excludeTags ?? [],
+            },
+            undefined,
+            `Loaded preset "${preset.name}".`
+        )
+    }
+
+    const deletePreset = async (presetId: string) => {
+        await fetch(`/api/library/presets/${presetId}`, {
+            method: "DELETE",
+        })
+        await refreshPresets()
+        setStatusMessage("Deleted preset.")
+    }
+
+    const runNaturalSearch = () => {
+        if (!naturalInput.trim()) {
+            setNaturalMessage("Enter a natural-language search first.")
+            return
+        }
+
+        startNaturalTransition(async () => {
+            const response = await fetch("/api/library/natural-search", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    input: naturalInput.trim(),
+                }),
+            })
+
+            if (!response.ok) {
+                setNaturalMessage("Natural-language search failed.")
+                return
+            }
+
+            const payload =
+                (await response.json()) as NaturalLanguageSearchResponse
+            applyParsedSearch(
+                {
+                    q: payload.parsed.q,
+                    actress: payload.parsed.actress,
+                    studio: payload.parsed.studio,
+                    code: payload.parsed.code,
+                    metadataStatus: payload.parsed.metadataStatus,
+                    yearFrom: payload.parsed.yearFrom,
+                    yearTo: payload.parsed.yearTo,
+                    sort: payload.parsed.sort,
+                    includeTags: payload.parsed.includeTags ?? [],
+                    excludeTags: payload.parsed.excludeTags ?? [],
+                },
+                payload.result,
+                payload.warning
+                    ? `${payload.interpretation} ${payload.warning}`
+                    : payload.interpretation
+            )
+            setNaturalMessage(
+                payload.warning
+                    ? `${payload.interpretation} ${payload.warning}`
+                    : payload.interpretation
+            )
+            setSuggestions([])
+        })
+    }
+
     useEffect(() => {
         const timer = window.setTimeout(() => {
             setDebouncedQuery(query)
@@ -258,15 +636,18 @@ export const HomePage = () => {
     useEffect(() => {
         const timer = window.setTimeout(() => {
             void runSuggestions(query)
-        }, 150)
+        }, 140)
 
         return () => window.clearTimeout(timer)
     }, [query])
 
     useEffect(() => {
-        void Promise.all([refreshRoots(), refreshStats(), refreshScanJob()]).then(() =>
-            runSearch({ query: "", page: 1 })
-        )
+        void Promise.all([
+            refreshRoots(),
+            refreshStats(),
+            refreshPresets(),
+            refreshScanJob(),
+        ]).then(() => runSearch({ query: "", page: 1 }))
     }, [])
 
     useEffect(() => {
@@ -274,7 +655,6 @@ export const HomePage = () => {
     }, [
         debouncedQuery,
         filters.actress,
-        filters.tag,
         filters.studio,
         filters.code,
         filters.metadataStatus,
@@ -282,6 +662,8 @@ export const HomePage = () => {
         filters.yearTo,
         filters.sort,
         filters.pageSize,
+        filters.includeTags.join("|"),
+        filters.excludeTags.join("|"),
     ])
 
     useEffect(() => {
@@ -303,8 +685,8 @@ export const HomePage = () => {
                     <div style={styles.kicker}>Local Index + Real Files</div>
                     <h1 style={styles.title}>MediaHub Library</h1>
                     <p style={styles.subtitle}>
-                        Scan real folders into a local search index, search as you type,
-                        and page through results with basic filters and sorting.
+                        Search with refinements, save filter presets, and optionally ask
+                        for results in natural language if you enable a local AI parser.
                     </p>
                 </div>
 
@@ -341,7 +723,11 @@ export const HomePage = () => {
                         <button
                             type="button"
                             onClick={runScan}
-                            disabled={isScanning || scanJob.status === "running" || scanJob.status === "queued"}
+                            disabled={
+                                isScanning ||
+                                scanJob.status === "running" ||
+                                scanJob.status === "queued"
+                            }
                             style={styles.primaryButton}
                         >
                             {scanJob.status === "running" || scanJob.status === "queued"
@@ -349,11 +735,13 @@ export const HomePage = () => {
                                 : "Scan Library"}
                         </button>
 
-                        {(scanJob.status === "running" || scanJob.status === "queued") && (
+                        {(scanJob.status === "running" ||
+                            scanJob.status === "queued") && (
                             <div style={styles.progressWrap}>
                                 <div style={styles.progressMeta}>
                                     <span>
-                                        {scanJob.processedFiles} / {scanJob.totalFiles || "?"} files
+                                        {scanJob.processedFiles} /{" "}
+                                        {scanJob.totalFiles || "?"} files
                                     </span>
                                     <span>{getProgressPercent(scanJob)}%</span>
                                 </div>
@@ -373,28 +761,57 @@ export const HomePage = () => {
                     </div>
 
                     <div style={styles.panel}>
-                        <h2 style={styles.panelTitle}>Filters</h2>
+                        <h2 style={styles.panelTitle}>Ask Naturally</h2>
+                        <p style={styles.panelText}>
+                            Example: `breastfeeding heavy videos with Mio after 2022 without
+                            comedy`
+                        </p>
+                        <textarea
+                            value={naturalInput}
+                            onChange={(event) => setNaturalInput(event.target.value)}
+                            placeholder="Describe what you're feeling like watching..."
+                            style={styles.textareaSmall}
+                        />
+                        <button
+                            type="button"
+                            onClick={runNaturalSearch}
+                            disabled={isNaturalSearching}
+                            style={styles.secondaryWideButton}
+                        >
+                            {isNaturalSearching ? "Interpreting..." : "Run Natural Search"}
+                        </button>
+                        {naturalMessage ? (
+                            <p style={styles.helperText}>{naturalMessage}</p>
+                        ) : (
+                            <p style={styles.helperText}>
+                                Optional local AI: set `OLLAMA_SEARCH_MODEL` on the backend to
+                                enable model-based parsing. Without it, the app falls back to
+                                built-in heuristics.
+                            </p>
+                        )}
+                    </div>
+
+                    <div style={styles.panel}>
+                        <h2 style={styles.panelTitle}>Refine Search</h2>
                         <div style={styles.filterGrid}>
                             <input
                                 value={filters.actress}
                                 onChange={(event) =>
-                                    setFilters((current) => ({ ...current, actress: event.target.value }))
+                                    setFilters((current) => ({
+                                        ...current,
+                                        actress: event.target.value,
+                                    }))
                                 }
                                 placeholder="Actress"
                                 style={styles.filterInput}
                             />
                             <input
-                                value={filters.tag}
-                                onChange={(event) =>
-                                    setFilters((current) => ({ ...current, tag: event.target.value }))
-                                }
-                                placeholder="Tag"
-                                style={styles.filterInput}
-                            />
-                            <input
                                 value={filters.studio}
                                 onChange={(event) =>
-                                    setFilters((current) => ({ ...current, studio: event.target.value }))
+                                    setFilters((current) => ({
+                                        ...current,
+                                        studio: event.target.value,
+                                    }))
                                 }
                                 placeholder="Studio"
                                 style={styles.filterInput}
@@ -402,7 +819,10 @@ export const HomePage = () => {
                             <input
                                 value={filters.code}
                                 onChange={(event) =>
-                                    setFilters((current) => ({ ...current, code: event.target.value }))
+                                    setFilters((current) => ({
+                                        ...current,
+                                        code: event.target.value,
+                                    }))
                                 }
                                 placeholder="Code"
                                 style={styles.filterInput}
@@ -437,22 +857,6 @@ export const HomePage = () => {
                                 <option value="year">Sort: Year</option>
                                 <option value="runtime">Sort: Runtime</option>
                             </select>
-                            <input
-                                value={filters.yearFrom}
-                                onChange={(event) =>
-                                    setFilters((current) => ({ ...current, yearFrom: event.target.value }))
-                                }
-                                placeholder="Year from"
-                                style={styles.filterInput}
-                            />
-                            <input
-                                value={filters.yearTo}
-                                onChange={(event) =>
-                                    setFilters((current) => ({ ...current, yearTo: event.target.value }))
-                                }
-                                placeholder="Year to"
-                                style={styles.filterInput}
-                            />
                             <select
                                 value={String(filters.pageSize)}
                                 onChange={(event) =>
@@ -468,7 +872,123 @@ export const HomePage = () => {
                                 <option value="48">48 / page</option>
                                 <option value="96">96 / page</option>
                             </select>
+                            <input
+                                value={filters.yearFrom}
+                                onChange={(event) =>
+                                    setFilters((current) => ({
+                                        ...current,
+                                        yearFrom: event.target.value,
+                                    }))
+                                }
+                                placeholder="Year from"
+                                style={styles.filterInput}
+                            />
+                            <input
+                                value={filters.yearTo}
+                                onChange={(event) =>
+                                    setFilters((current) => ({
+                                        ...current,
+                                        yearTo: event.target.value,
+                                    }))
+                                }
+                                placeholder="Year to"
+                                style={styles.filterInput}
+                            />
                         </div>
+
+                        <div style={styles.tagSection}>
+                            <div style={styles.tagRow}>
+                                <input
+                                    value={tagInput}
+                                    onChange={(event) => setTagInput(event.target.value)}
+                                    onKeyDown={(event) => {
+                                        if (event.key === "Enter") {
+                                            event.preventDefault()
+                                            addIncludeTag(tagInput)
+                                        }
+                                    }}
+                                    placeholder="Add include tag"
+                                    style={styles.filterInput}
+                                />
+                                <button
+                                    type="button"
+                                    onClick={() => addIncludeTag(tagInput)}
+                                    style={styles.smallButton}
+                                >
+                                    Add
+                                </button>
+                            </div>
+                            <div style={styles.tagRow}>
+                                <input
+                                    value={excludeTagInput}
+                                    onChange={(event) =>
+                                        setExcludeTagInput(event.target.value)
+                                    }
+                                    onKeyDown={(event) => {
+                                        if (event.key === "Enter") {
+                                            event.preventDefault()
+                                            addExcludeTag(excludeTagInput)
+                                        }
+                                    }}
+                                    placeholder="Add exclude tag"
+                                    style={styles.filterInput}
+                                />
+                                <button
+                                    type="button"
+                                    onClick={() => addExcludeTag(excludeTagInput)}
+                                    style={styles.smallButton}
+                                >
+                                    Exclude
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div style={styles.panel}>
+                        <h2 style={styles.panelTitle}>Saved Presets</h2>
+                        <div style={styles.presetRow}>
+                            <input
+                                value={presetName}
+                                onChange={(event) => setPresetName(event.target.value)}
+                                placeholder="Preset name"
+                                style={styles.filterInput}
+                            />
+                            <button
+                                type="button"
+                                onClick={savePreset}
+                                disabled={isSavingPreset}
+                                style={styles.smallButton}
+                            >
+                                {isSavingPreset ? "Saving..." : "Save"}
+                            </button>
+                        </div>
+                        {presets.length ? (
+                            <div style={styles.rootList}>
+                                {presets.map((preset) => (
+                                    <div key={preset.id} style={styles.rootItem}>
+                                        <span style={styles.rootPath}>{preset.name}</span>
+                                        <div style={styles.inlineActions}>
+                                            <button
+                                                type="button"
+                                                style={styles.secondarySmallButton}
+                                                onClick={() => loadPreset(preset)}
+                                            >
+                                                Load
+                                            </button>
+                                            <button
+                                                type="button"
+                                                style={styles.ghostButton}
+                                                onClick={() => void deletePreset(preset.id)}
+                                            >
+                                                Delete
+                                            </button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : (
+                            <p style={styles.panelText}>No saved presets yet.</p>
+                        )}
                     </div>
 
                     <div style={styles.panel}>
@@ -523,12 +1043,14 @@ export const HomePage = () => {
                                     void runSearch({ query: value, page: 1 })
                                 }}
                                 suggestions={suggestions}
-                                onSuggestionSelect={(value) => {
-                                    setQuery(value)
-                                    setDebouncedQuery(value)
-                                    setSuggestions([])
-                                    void runSearch({ query: value, page: 1 })
-                                }}
+                                onSuggestionSelect={(value) =>
+                                    handleSuggestionSelect(
+                                        suggestions.find((suggestion) => suggestion.value === value) ?? {
+                                            value,
+                                            kind: "title",
+                                        }
+                                    )
+                                }
                                 isSearching={isSearching}
                                 placeholder="Search title, code, actress, studio, tags..."
                             />
@@ -543,6 +1065,21 @@ export const HomePage = () => {
                         <p style={styles.statusLine}>
                             {isSearching ? "Searching..." : statusMessage}
                         </p>
+
+                        {activeChips.length ? (
+                            <div style={styles.chipWrap}>
+                                {activeChips.map((chip) => (
+                                    <button
+                                        key={chip.key}
+                                        type="button"
+                                        style={styles.chip}
+                                        onClick={() => removeChip(chip.kind, chip.value)}
+                                    >
+                                        {chip.label} ×
+                                    </button>
+                                ))}
+                            </div>
+                        ) : null}
                     </div>
 
                     <div style={styles.paginationRow}>
@@ -601,6 +1138,20 @@ export const HomePage = () => {
                                             {selectedVideo.actresses.join(", ") ||
                                                 "No actress metadata yet"}
                                         </div>
+                                        {selectedVideo.tags.length ? (
+                                            <div style={styles.quickTagWrap}>
+                                                {selectedVideo.tags.slice(0, 8).map((tag) => (
+                                                    <button
+                                                        key={tag}
+                                                        type="button"
+                                                        style={styles.quickTag}
+                                                        onClick={() => addIncludeTag(tag)}
+                                                    >
+                                                        + {tag}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        ) : null}
                                         <div style={styles.pathBox}>{selectedVideo.videoPath}</div>
                                         {selectedVideo.plot ? (
                                             <p style={styles.plot}>{selectedVideo.plot}</p>
@@ -679,7 +1230,7 @@ const styles = {
     },
     workspace: {
         display: "grid",
-        gridTemplateColumns: "320px minmax(0, 1fr)",
+        gridTemplateColumns: "360px minmax(0, 1fr)",
         gap: "20px",
     },
     sidebar: {
@@ -707,6 +1258,12 @@ const styles = {
         color: "#94a3b8",
         lineHeight: 1.5,
     },
+    helperText: {
+        margin: "12px 0 0",
+        color: "#94a3b8",
+        fontSize: "13px",
+        lineHeight: 1.5,
+    },
     textarea: {
         width: "100%",
         minHeight: "120px",
@@ -720,6 +1277,17 @@ const styles = {
         fontFamily: "var(--font-geist-mono)",
         fontSize: "13px",
     },
+    textareaSmall: {
+        width: "100%",
+        minHeight: "88px",
+        resize: "vertical" as const,
+        borderRadius: "14px",
+        border: "1px solid rgba(148, 163, 184, 0.18)",
+        background: "#020617",
+        color: "#e2e8f0",
+        padding: "14px",
+        fontSize: "13px",
+    },
     primaryButton: {
         width: "100%",
         border: "none",
@@ -730,6 +1298,17 @@ const styles = {
         fontWeight: 700,
         cursor: "pointer",
     },
+    secondaryWideButton: {
+        width: "100%",
+        marginTop: "12px",
+        border: "1px solid rgba(56, 189, 248, 0.3)",
+        borderRadius: "14px",
+        padding: "12px 16px",
+        background: "rgba(2, 132, 199, 0.16)",
+        color: "#e0f2fe",
+        cursor: "pointer",
+        fontWeight: 700,
+    },
     secondaryButton: {
         border: "1px solid rgba(148, 163, 184, 0.2)",
         borderRadius: "12px",
@@ -737,6 +1316,24 @@ const styles = {
         background: "rgba(15, 23, 42, 0.85)",
         color: "#e2e8f0",
         cursor: "pointer",
+    },
+    secondarySmallButton: {
+        border: "1px solid rgba(148, 163, 184, 0.2)",
+        borderRadius: "999px",
+        padding: "8px 12px",
+        background: "rgba(15, 23, 42, 0.85)",
+        color: "#e2e8f0",
+        cursor: "pointer",
+    },
+    smallButton: {
+        border: "none",
+        borderRadius: "12px",
+        padding: "10px 14px",
+        background: "#0ea5e9",
+        color: "#082f49",
+        cursor: "pointer",
+        fontWeight: 700,
+        whiteSpace: "nowrap" as const,
     },
     ghostButton: {
         border: "1px solid rgba(248, 113, 113, 0.25)",
@@ -759,6 +1356,11 @@ const styles = {
         borderRadius: "14px",
         background: "rgba(2, 6, 23, 0.65)",
     },
+    inlineActions: {
+        display: "flex",
+        gap: "8px",
+        flexWrap: "wrap" as const,
+    },
     rootPath: {
         fontSize: "13px",
         wordBreak: "break-all" as const,
@@ -776,6 +1378,21 @@ const styles = {
         border: "1px solid rgba(148, 163, 184, 0.18)",
         background: "#020617",
         color: "#e2e8f0",
+    },
+    tagSection: {
+        display: "flex",
+        flexDirection: "column" as const,
+        gap: "10px",
+        marginTop: "12px",
+    },
+    tagRow: {
+        display: "flex",
+        gap: "8px",
+    },
+    presetRow: {
+        display: "flex",
+        gap: "8px",
+        marginBottom: "12px",
     },
     warningBox: {
         display: "flex",
@@ -824,6 +1441,20 @@ const styles = {
     statusLine: {
         margin: "12px 0 0",
         color: "#94a3b8",
+    },
+    chipWrap: {
+        display: "flex",
+        flexWrap: "wrap" as const,
+        gap: "8px",
+        marginTop: "14px",
+    },
+    chip: {
+        border: "1px solid rgba(56, 189, 248, 0.25)",
+        borderRadius: "999px",
+        padding: "8px 12px",
+        background: "rgba(2, 132, 199, 0.16)",
+        color: "#e0f2fe",
+        cursor: "pointer",
     },
     paginationRow: {
         display: "flex",
@@ -881,6 +1512,19 @@ const styles = {
     metaLine: {
         color: "#cbd5e1",
         fontSize: "14px",
+    },
+    quickTagWrap: {
+        display: "flex",
+        flexWrap: "wrap" as const,
+        gap: "8px",
+    },
+    quickTag: {
+        border: "1px solid rgba(34, 197, 94, 0.25)",
+        borderRadius: "999px",
+        padding: "6px 10px",
+        background: "rgba(34, 197, 94, 0.12)",
+        color: "#dcfce7",
+        cursor: "pointer",
     },
     pathBox: {
         fontSize: "12px",

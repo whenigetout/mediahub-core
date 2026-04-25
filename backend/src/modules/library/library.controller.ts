@@ -2,16 +2,24 @@ import { FastifyInstance } from "fastify"
 import { createReadStream, promises as fs } from "fs"
 import path from "path"
 import {
+    createSearchPreset,
+    executeNaturalLanguageSearch,
     fetchCurrentScanJob,
     fetchConfiguredRoots,
     fetchLibraryItem,
+    fetchSearchPresets,
     fetchLibrarySearchResults,
     fetchLibrarySuggestions,
     fetchLibraryStats,
     removeConfiguredRoot,
+    removeSearchPreset,
     startLibraryScan,
 } from "./library.service"
-import { LibrarySearchParams, ScanRequest } from "./library.types"
+import {
+    CreateSearchPresetInput,
+    LibrarySearchParams,
+    ScanRequest,
+} from "./library.types"
 
 const getContentType = (filePath: string) => {
     switch (path.extname(filePath).toLowerCase()) {
@@ -54,6 +62,32 @@ export async function libraryRoutes(fastify: FastifyInstance) {
         return fetchLibraryStats(fastify)
     })
 
+    fastify.get("/library/presets", async () => {
+        return {
+            presets: fetchSearchPresets(fastify),
+        }
+    })
+
+    fastify.post("/library/presets", async (request, reply) => {
+        const body = (request.body ?? {}) as CreateSearchPresetInput
+        if (!body.name?.trim()) {
+            return reply.code(400).send({ message: "Preset name is required." })
+        }
+
+        return reply.code(201).send(
+            createSearchPreset(fastify, {
+                name: body.name.trim(),
+                params: body.params ?? {},
+            })
+        )
+    })
+
+    fastify.delete("/library/presets/:id", async (request, reply) => {
+        const { id } = request.params as { id: string }
+        removeSearchPreset(fastify, id)
+        return reply.code(204).send()
+    })
+
     fastify.get("/library/scan/current", async () => {
         return fetchCurrentScanJob()
     })
@@ -65,6 +99,12 @@ export async function libraryRoutes(fastify: FastifyInstance) {
             q: query.q,
             actress: query.actress,
             tag: query.tag,
+            includeTags: query.includeTags
+                ? query.includeTags.split(",").map((tag) => tag.trim()).filter(Boolean)
+                : undefined,
+            excludeTags: query.excludeTags
+                ? query.excludeTags.split(",").map((tag) => tag.trim()).filter(Boolean)
+                : undefined,
             studio: query.studio,
             code: query.code,
             metadataStatus: query.metadataStatus,
@@ -83,6 +123,17 @@ export async function libraryRoutes(fastify: FastifyInstance) {
         return {
             suggestions: fetchLibrarySuggestions(fastify, q ?? ""),
         }
+    })
+
+    fastify.post("/library/natural-search", async (request, reply) => {
+        const { input } = (request.body ?? {}) as { input?: string }
+        if (!input?.trim()) {
+            return reply
+                .code(400)
+                .send({ message: "Natural-language input is required." })
+        }
+
+        return executeNaturalLanguageSearch(fastify, input.trim())
     })
 
     fastify.post("/library/scan", async (request, reply) => {

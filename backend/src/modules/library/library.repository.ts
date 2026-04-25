@@ -1,12 +1,14 @@
 import { FastifyInstance } from "fastify"
 import { randomUUID } from "crypto"
 import {
+    CreateSearchPresetInput,
     EnrichedMetadata,
     LibraryItem,
     LibrarySearchParams,
     LibrarySearchResult,
     LibrarySuggestion,
     ScanCandidate,
+    SearchPreset,
 } from "./library.types"
 
 type LibraryRootRow = {
@@ -36,6 +38,28 @@ type LibraryItemRow = {
     modified_at: number | null
     last_scanned_at: string
 }
+
+type SearchPresetRow = {
+    id: string
+    name: string
+    params_json: string
+    created_at: string
+    updated_at: string
+}
+
+const normalizeSearchText = (value: string) =>
+    value
+        .trim()
+        .toLowerCase()
+        .replace(/[-_/]+/g, " ")
+        .replace(/\s+/g, " ")
+
+const splitSearchTerms = (value?: string) =>
+    value
+        ? normalizeSearchText(value)
+              .split(/\s+/)
+              .filter(Boolean)
+        : []
 
 const parseJsonArray = (value: string): string[] => {
     try {
@@ -439,6 +463,8 @@ export const searchLibrary = (
     const offset = Math.max(params.offset ?? 0, 0)
     const whereClauses = ["is_available = 1"]
     const values: Array<string | number> = []
+    const scoreClauses: string[] = []
+    const scoreValues: Array<string | number> = []
 
     const addLikeFilter = (column: string, value?: string) => {
         if (!value?.trim()) {
@@ -446,24 +472,83 @@ export const searchLibrary = (
         }
 
         whereClauses.push(`${column} LIKE ?`)
-        values.push(`%${value.trim().toLowerCase()}%`)
+        values.push(`%${normalizeSearchText(value)}%`)
     }
 
-    const terms = params.q
-        ?.trim()
-        .toLowerCase()
-        .split(/\s+/)
-        .filter(Boolean) ?? []
+    const terms = splitSearchTerms(params.q)
+    const normalizedQuery = params.q?.trim()
+        ? normalizeSearchText(params.q)
+        : null
 
     for (const term of terms) {
         whereClauses.push("search_text LIKE ?")
         values.push(`%${term}%`)
+
+        scoreClauses.push(`
+            CASE WHEN LOWER(COALESCE(code, '')) = ? THEN 120 ELSE 0 END +
+            CASE WHEN LOWER(COALESCE(title, '')) = ? THEN 80 ELSE 0 END +
+            CASE WHEN LOWER(COALESCE(title, '')) LIKE ? THEN 45 ELSE 0 END +
+            CASE WHEN LOWER(COALESCE(filename, '')) LIKE ? THEN 35 ELSE 0 END +
+            CASE WHEN actress_text LIKE ? THEN 30 ELSE 0 END +
+            CASE WHEN tag_text LIKE ? THEN 36 ELSE 0 END +
+            CASE WHEN LOWER(COALESCE(studio, '')) LIKE ? THEN 20 ELSE 0 END +
+            CASE WHEN search_text LIKE ? THEN 8 ELSE 0 END
+        `)
+        scoreValues.push(
+            term,
+            term,
+            `${term}%`,
+            `${term}%`,
+            `%${term}%`,
+            `%${term}%`,
+            `%${term}%`,
+            `%${term}%`
+        )
+    }
+
+    if (normalizedQuery) {
+        scoreClauses.push(`
+            CASE WHEN LOWER(COALESCE(code, '')) = ? THEN 160 ELSE 0 END +
+            CASE WHEN LOWER(COALESCE(title, '')) = ? THEN 110 ELSE 0 END +
+            CASE WHEN LOWER(COALESCE(title, '')) LIKE ? THEN 60 ELSE 0 END +
+            CASE WHEN tag_text LIKE ? THEN 45 ELSE 0 END +
+            CASE WHEN actress_text LIKE ? THEN 35 ELSE 0 END
+        `)
+        scoreValues.push(
+            normalizedQuery,
+            normalizedQuery,
+            `${normalizedQuery}%`,
+            `%${normalizedQuery}%`,
+            `%${normalizedQuery}%`
+        )
     }
 
     addLikeFilter("actress_text", params.actress)
     addLikeFilter("tag_text", params.tag)
     addLikeFilter("LOWER(COALESCE(studio, ''))", params.studio)
     addLikeFilter("LOWER(COALESCE(code, ''))", params.code)
+
+    for (const tag of params.includeTags ?? []) {
+        if (!tag.trim()) {
+            continue
+        }
+
+        const normalizedTag = normalizeSearchText(tag)
+        whereClauses.push("tag_text LIKE ?")
+        values.push(`%${normalizedTag}%`)
+        scoreClauses.push("CASE WHEN tag_text LIKE ? THEN 55 ELSE 0 END")
+        scoreValues.push(`%${normalizedTag}%`)
+    }
+
+    for (const tag of params.excludeTags ?? []) {
+        if (!tag.trim()) {
+            continue
+        }
+
+        const normalizedTag = normalizeSearchText(tag)
+        whereClauses.push("tag_text NOT LIKE ?")
+        values.push(`%${normalizedTag}%`)
+    }
 
     if (typeof params.yearFrom === "number" && Number.isFinite(params.yearFrom)) {
         whereClauses.push("year >= ?")
@@ -484,6 +569,10 @@ export const searchLibrary = (
         ? `WHERE ${whereClauses.join(" AND ")}`
         : ""
 
+    const relevanceSql = scoreClauses.length
+        ? scoreClauses.join(" + ")
+        : "0"
+
     const sortSql = (() => {
         switch (params.sort) {
             case "title":
@@ -497,8 +586,8 @@ export const searchLibrary = (
             case "relevance":
             default:
                 return `
+                    relevance_score DESC,
                     CASE WHEN code IS NULL THEN 1 ELSE 0 END,
-                    CASE WHEN title IS NULL THEN 1 ELSE 0 END,
                     last_scanned_at DESC,
                     title COLLATE NOCASE ASC,
                     filename COLLATE NOCASE ASC
@@ -541,7 +630,8 @@ export const searchLibrary = (
                 is_available,
                 file_size,
                 modified_at,
-                last_scanned_at
+                last_scanned_at,
+                (${relevanceSql}) AS relevance_score
             FROM library_item
             ${whereSql}
             ORDER BY ${sortSql}
@@ -549,7 +639,7 @@ export const searchLibrary = (
             OFFSET ?
             `
         )
-        .all(...values, limit, offset) as LibraryItemRow[]
+        .all(...scoreValues, ...values, limit, offset) as LibraryItemRow[]
 
     return {
         items: rows.map(mapLibraryItem),
@@ -563,10 +653,12 @@ export const getLibrarySuggestions = (
     fastify: FastifyInstance,
     query: string
 ): LibrarySuggestion[] => {
-    const normalized = query.trim().toLowerCase()
+    const normalized = normalizeSearchText(query)
     if (!normalized) {
         return []
     }
+
+    const terms = splitSearchTerms(query)
 
     const rows = fastify.db
         .prepare(
@@ -581,7 +673,7 @@ export const getLibrarySuggestions = (
             WHERE is_available = 1
               AND search_text LIKE ?
             ORDER BY last_scanned_at DESC
-            LIMIT 20
+            LIMIT 40
             `
         )
         .all(`%${normalized}%`) as Array<{
@@ -592,7 +684,7 @@ export const getLibrarySuggestions = (
         tags: string
     }>
 
-    const suggestions: LibrarySuggestion[] = []
+    const suggestions: Array<LibrarySuggestion & { score: number }> = []
     const seen = new Set<string>()
     const pushSuggestion = (
         value: string | null,
@@ -603,17 +695,30 @@ export const getLibrarySuggestions = (
             return
         }
 
-        if (!normalizedValue.toLowerCase().includes(normalized)) {
+        const haystack = normalizeSearchText(normalizedValue)
+        if (!terms.every((term) => haystack.includes(term))) {
             return
         }
 
-        const key = `${kind}:${normalizedValue.toLowerCase()}`
+        const key = `${kind}:${haystack}`
         if (seen.has(key)) {
             return
         }
 
         seen.add(key)
-        suggestions.push({ value: normalizedValue, kind })
+        let score = 0
+        if (haystack === normalized) score += 80
+        if (haystack.startsWith(normalized)) score += 35
+        for (const term of terms) {
+            if (haystack.startsWith(term)) score += 15
+            if (haystack.includes(term)) score += 6
+        }
+
+        if (kind === "tag") score += 12
+        if (kind === "actress") score += 8
+        if (kind === "code") score += 10
+
+        suggestions.push({ value: normalizedValue, kind, score })
     }
 
     for (const row of rows) {
@@ -630,7 +735,112 @@ export const getLibrarySuggestions = (
         }
     }
 
-    return suggestions.slice(0, 8)
+    return suggestions
+        .sort((a, b) => b.score - a.score || a.value.localeCompare(b.value))
+        .slice(0, 10)
+        .map(({ score: _score, ...suggestion }) => suggestion)
+}
+
+const parsePresetParams = (value: string): LibrarySearchParams => {
+    try {
+        const parsed = JSON.parse(value) as LibrarySearchParams
+        return {
+            ...parsed,
+            includeTags: Array.isArray(parsed.includeTags) ? parsed.includeTags : [],
+            excludeTags: Array.isArray(parsed.excludeTags) ? parsed.excludeTags : [],
+        }
+    } catch {
+        return {
+            includeTags: [],
+            excludeTags: [],
+        }
+    }
+}
+
+const mapSearchPreset = (row: SearchPresetRow): SearchPreset => ({
+    id: row.id,
+    name: row.name,
+    params: parsePresetParams(row.params_json),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+})
+
+export const listSearchPresets = (
+    fastify: FastifyInstance
+): SearchPreset[] => {
+    const rows = fastify.db
+        .prepare(
+            `
+            SELECT id, name, params_json, created_at, updated_at
+            FROM search_preset
+            ORDER BY updated_at DESC, name COLLATE NOCASE ASC
+            `
+        )
+        .all() as SearchPresetRow[]
+
+    return rows.map(mapSearchPreset)
+}
+
+export const saveSearchPreset = (
+    fastify: FastifyInstance,
+    input: CreateSearchPresetInput
+): SearchPreset => {
+    const existing = fastify.db
+        .prepare(
+            `
+            SELECT id, name, params_json, created_at, updated_at
+            FROM search_preset
+            WHERE LOWER(name) = LOWER(?)
+            `
+        )
+        .get(input.name.trim()) as SearchPresetRow | undefined
+
+    const presetId = existing?.id ?? randomUUID()
+    fastify.db
+        .prepare(
+            `
+            INSERT INTO search_preset (id, name, params_json, created_at, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(name) DO UPDATE SET
+                params_json = excluded.params_json,
+                updated_at = CURRENT_TIMESTAMP
+            `
+        )
+        .run(
+            presetId,
+            input.name.trim(),
+            JSON.stringify({
+                ...input.params,
+                includeTags: input.params.includeTags ?? [],
+                excludeTags: input.params.excludeTags ?? [],
+            })
+        )
+
+    const row = fastify.db
+        .prepare(
+            `
+            SELECT id, name, params_json, created_at, updated_at
+            FROM search_preset
+            WHERE id = ?
+            `
+        )
+        .get(presetId) as SearchPresetRow
+
+    return mapSearchPreset(row)
+}
+
+export const deleteSearchPreset = (
+    fastify: FastifyInstance,
+    presetId: string
+) => {
+    fastify.db
+        .prepare(
+            `
+            DELETE FROM search_preset
+            WHERE id = ?
+            `
+        )
+        .run(presetId)
 }
 
 export const getMetadataByCode = (

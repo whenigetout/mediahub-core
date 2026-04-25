@@ -1,23 +1,30 @@
 import { FastifyInstance } from "fastify"
 import {
+    CreateSearchPresetInput,
     ConfiguredLibraryRoot,
     LibrarySearchParams,
     LibrarySearchResult,
     LibraryScanJobStatus,
     LibraryStats,
     LibrarySuggestion,
+    NaturalLanguageSearchResponse,
     ScanSummary,
+    SearchPreset,
 } from "./library.types"
 import {
     deleteConfiguredRoot,
+    deleteSearchPreset,
     getLibraryItemById,
     getLibrarySuggestions,
     getLibraryStats,
     listConfiguredRoots,
+    listSearchPresets,
+    saveSearchPreset,
     searchLibrary,
 } from "./library.repository"
 import { scanLibrary } from "./library.scanner"
 import { randomUUID } from "crypto"
+import { runNaturalLanguageSearch } from "./library.nlp"
 
 let currentScanJob: LibraryScanJobStatus = {
     jobId: "idle",
@@ -142,4 +149,31 @@ export const fetchLibrarySuggestions = (
     query: string
 ): LibrarySuggestion[] => {
     return getLibrarySuggestions(fastify, query)
+}
+
+export const fetchSearchPresets = (
+    fastify: FastifyInstance
+): SearchPreset[] => {
+    return listSearchPresets(fastify)
+}
+
+export const createSearchPreset = (
+    fastify: FastifyInstance,
+    input: CreateSearchPresetInput
+): SearchPreset => {
+    return saveSearchPreset(fastify, input)
+}
+
+export const removeSearchPreset = (
+    fastify: FastifyInstance,
+    presetId: string
+) => {
+    return deleteSearchPreset(fastify, presetId)
+}
+
+export const executeNaturalLanguageSearch = (
+    fastify: FastifyInstance,
+    input: string
+): Promise<NaturalLanguageSearchResponse> => {
+    return runNaturalLanguageSearch(fastify, input)
 }
