@@ -112,3 +112,18 @@ export type NaturalLanguageSearchResponse = {
     warning: string | null
     result: SearchResponse
 }
+
+export type BackendStatusResponse = {
+    backend: {
+        available: boolean
+        message: string
+    }
+    ai: {
+        provider: "ollama"
+        configured: boolean
+        available: boolean
+        model: string | null
+        url: string | null
+        message: string
+    }
+}

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState, useTransition } from "react"
 import { HomeFeed, SearchBar } from "./components"
 import {
+    BackendStatusResponse,
     ConfiguredRoot,
     LibraryItem,
     LibraryScanJobStatus,
@@ -98,6 +99,7 @@ export const HomePage = () => {
     const [totalResults, setTotalResults] = useState(0)
     const [suggestions, setSuggestions] = useState<LibrarySuggestion[]>([])
     const [presets, setPresets] = useState<SearchPreset[]>([])
+    const [backendStatus, setBackendStatus] = useState<BackendStatusResponse | null>(null)
     const [presetName, setPresetName] = useState("")
     const [naturalInput, setNaturalInput] = useState("")
     const [naturalMessage, setNaturalMessage] = useState("")
@@ -155,6 +157,47 @@ export const HomePage = () => {
         const response = await fetch("/api/library/presets", { cache: "no-store" })
         const payload = (await response.json()) as SearchPresetsResponse
         setPresets(payload.presets)
+    }
+
+    const refreshBackendStatus = async () => {
+        try {
+            const response = await fetch("/api/library/status", { cache: "no-store" })
+            if (!response.ok) {
+                setBackendStatus({
+                    backend: {
+                        available: false,
+                        message: `Backend status request failed with ${response.status}.`,
+                    },
+                    ai: {
+                        provider: "ollama",
+                        configured: false,
+                        available: false,
+                        model: null,
+                        url: null,
+                        message: "AI status unavailable because the backend status check failed.",
+                    },
+                })
+                return
+            }
+
+            const payload = (await response.json()) as BackendStatusResponse
+            setBackendStatus(payload)
+        } catch {
+            setBackendStatus({
+                backend: {
+                    available: false,
+                    message: "Backend is not reachable from the frontend right now.",
+                },
+                ai: {
+                    provider: "ollama",
+                    configured: false,
+                    available: false,
+                    model: null,
+                    url: null,
+                    message: "AI status unavailable because the backend could not be reached.",
+                },
+            })
+        }
     }
 
     const refreshScanJob = async () => {
@@ -647,6 +690,7 @@ export const HomePage = () => {
             refreshStats(),
             refreshPresets(),
             refreshScanJob(),
+            refreshBackendStatus(),
         ]).then(() => runSearch({ query: "", page: 1 }))
     }, [])
 
@@ -708,6 +752,55 @@ export const HomePage = () => {
 
             <div style={styles.workspace}>
                 <section style={styles.sidebar}>
+                    <div style={styles.panel}>
+                        <h2 style={styles.panelTitle}>Connection Status</h2>
+                        <div
+                            style={{
+                                ...styles.statusCard,
+                                ...(backendStatus?.backend.available
+                                    ? styles.statusCardOk
+                                    : styles.statusCardError),
+                            }}
+                        >
+                            <strong>
+                                {backendStatus?.backend.available
+                                    ? "Backend Connected"
+                                    : "Backend Unavailable"}
+                            </strong>
+                            <span>
+                                {backendStatus?.backend.message ??
+                                    "Checking backend connection..."}
+                            </span>
+                        </div>
+                        <div
+                            style={{
+                                ...styles.statusCard,
+                                ...(backendStatus?.ai.available
+                                    ? styles.statusCardOk
+                                    : backendStatus?.ai.configured
+                                      ? styles.statusCardWarn
+                                      : styles.statusCardMuted),
+                            }}
+                        >
+                            <strong>
+                                {backendStatus?.ai.available
+                                    ? "AI Search Ready"
+                                    : backendStatus?.ai.configured
+                                      ? "AI Search Not Ready"
+                                      : "AI Search Not Configured"}
+                            </strong>
+                            <span>
+                                {backendStatus?.ai.message ??
+                                    "Checking local AI availability..."}
+                            </span>
+                            {backendStatus?.ai.model ? (
+                                <span style={styles.statusMeta}>
+                                    Model: {backendStatus.ai.model}
+                                </span>
+                            ) : null}
+                        </div>
+                    </div>
+
                     <div style={styles.panel}>
                         <h2 style={styles.panelTitle}>Library Roots</h2>
                         <p style={styles.panelText}>
@@ -1365,6 +1458,35 @@ const styles = {
         fontSize: "13px",
         wordBreak: "break-all" as const,
         color: "#cbd5e1",
+    },
+    statusCard: {
+        display: "flex",
+        flexDirection: "column" as const,
+        gap: "6px",
+        padding: "12px",
+        borderRadius: "14px",
+        border: "1px solid rgba(148, 163, 184, 0.16)",
+        marginBottom: "10px",
+    },
+    statusCardOk: {
+        background: "rgba(20, 83, 45, 0.35)",
+        color: "#dcfce7",
+    },
+    statusCardWarn: {
+        background: "rgba(120, 53, 15, 0.35)",
+        color: "#fed7aa",
+    },
+    statusCardError: {
+        background: "rgba(127, 29, 29, 0.35)",
+        color: "#fecaca",
+    },
+    statusCardMuted: {
+        background: "rgba(30, 41, 59, 0.55)",
+        color: "#cbd5e1",
+    },
+    statusMeta: {
+        fontSize: "12px",
+        color: "#bfdbfe",
     },
     filterGrid: {
         display: "grid",

@@ -4,6 +4,7 @@ import path from "path"
 import {
     createSearchPreset,
     executeNaturalLanguageSearch,
+    fetchAiSearchStatus,
     fetchCurrentScanJob,
     fetchConfiguredRoots,
     fetchLibraryItem,
@@ -60,6 +61,16 @@ export async function libraryRoutes(fastify: FastifyInstance) {
 
     fastify.get("/library/stats", async () => {
         return fetchLibraryStats(fastify)
+    })
+
+    fastify.get("/library/status", async () => {
+        return {
+            backend: {
+                available: true,
+                message: "Backend is connected.",
+            },
+            ai: await fetchAiSearchStatus(),
+        }
     })
 
     fastify.get("/library/presets", async () => {

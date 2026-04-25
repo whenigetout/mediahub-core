@@ -84,6 +84,15 @@ export type NaturalLanguageSearchResponse = {
     result: LibrarySearchResult
 }
 
+export type AiSearchStatus = {
+    provider: "ollama"
+    configured: boolean
+    available: boolean
+    model: string | null
+    url: string | null
+    message: string
+}
+
 export type LibraryScanJobStatus = {
     jobId: string
     status: "idle" | "queued" | "running" | "completed" | "failed"

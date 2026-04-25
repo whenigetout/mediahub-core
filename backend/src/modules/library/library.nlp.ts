@@ -1,11 +1,13 @@
 import { FastifyInstance } from "fastify"
 import {
+    AiSearchStatus,
     LibrarySearchParams,
     NaturalLanguageSearchResponse,
 } from "./library.types"
 import { searchLibrary } from "./library.repository"
 
 const DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+const DEFAULT_OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
 
 const normalizeText = (value: string) =>
     value
@@ -105,6 +107,87 @@ const parseModelJson = (output: string): LibrarySearchParams | null => {
         }
     } catch {
         return null
+    }
+}
+
+const getOllamaTagsUrl = () => {
+    const configured = process.env.OLLAMA_SEARCH_URL?.trim()
+    if (!configured) {
+        return DEFAULT_OLLAMA_TAGS_URL
+    }
+
+    try {
+        const parsed = new URL(configured)
+        parsed.pathname = "/api/tags"
+        parsed.search = ""
+        return parsed.toString()
+    } catch {
+        return DEFAULT_OLLAMA_TAGS_URL
+    }
+}
+
+export const getAiSearchStatus = async (): Promise<AiSearchStatus> => {
+    const model = process.env.OLLAMA_SEARCH_MODEL?.trim() ?? null
+    const url = process.env.OLLAMA_SEARCH_URL?.trim() ?? DEFAULT_OLLAMA_URL
+
+    if (!model) {
+        return {
+            provider: "ollama",
+            configured: false,
+            available: false,
+            model: null,
+            url,
+            message: "AI search is not configured. Set OLLAMA_SEARCH_MODEL in backend/.env.",
+        }
+    }
+
+    try {
+        const response = await fetch(getOllamaTagsUrl(), {
+            method: "GET",
+        })
+
+        if (!response.ok) {
+            return {
+                provider: "ollama",
+                configured: true,
+                available: false,
+                model,
+                url,
+                message: `Ollama server responded with status ${response.status}.`,
+            }
+        }
+
+        const payload = (await response.json()) as {
+            models?: Array<{ name?: string; model?: string }>
+        }
+
+        const availableModels = (payload.models ?? [])
+            .map((entry) => entry.name ?? entry.model ?? "")
+            .filter(Boolean)
+
+        const hasRequestedModel = availableModels.some(
+            (entry) => entry === model || entry.startsWith(`${model}:`)
+        )
+
+        return {
+            provider: "ollama",
+            configured: true,
+            available: hasRequestedModel,
+            model,
+            url,
+            message: hasRequestedModel
+                ? `AI search is available through Ollama with model ${model}.`
+                : `Ollama is reachable, but model ${model} is not currently installed.`,
+        }
+    } catch {
+        return {
+            provider: "ollama",
+            configured: true,
+            available: false,
+            model,
+            url,
+            message: "Ollama server could not be reached from the backend.",
+        }
     }
 }
 

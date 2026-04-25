@@ -24,7 +24,8 @@ import {
 } from "./library.repository"
 import { scanLibrary } from "./library.scanner"
 import { randomUUID } from "crypto"
-import { runNaturalLanguageSearch } from "./library.nlp"
+import { getAiSearchStatus, runNaturalLanguageSearch } from "./library.nlp"
+import { AiSearchStatus } from "./library.types"
 
 let currentScanJob: LibraryScanJobStatus = {
     jobId: "idle",
@@ -176,4 +177,8 @@ export const executeNaturalLanguageSearch = (
     input: string
 ): Promise<NaturalLanguageSearchResponse> => {
     return runNaturalLanguageSearch(fastify, input)
+}
+
+export const fetchAiSearchStatus = (): Promise<AiSearchStatus> => {
+    return getAiSearchStatus()
 }
