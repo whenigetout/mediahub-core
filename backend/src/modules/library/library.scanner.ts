@@ -208,12 +208,58 @@ const buildCandidate = async (
     }
 }
 
+const countVideoFiles = async (rootPath: string) => {
+    let total = 0
+    const queue = [rootPath]
+
+    while (queue.length) {
+        const currentPath = queue.shift()
+        if (!currentPath) {
+            continue
+        }
+
+        let entries: import("fs").Dirent<string>[] = []
+        try {
+            entries = await fs.readdir(currentPath, {
+                withFileTypes: true,
+                encoding: "utf8",
+            })
+        } catch {
+            continue
+        }
+
+        for (const entry of entries) {
+            const absolutePath = path.join(currentPath, entry.name)
+
+            if (entry.isDirectory()) {
+                queue.push(absolutePath)
+                continue
+            }
+
+            if (
+                entry.isFile() &&
+                VIDEO_EXTENSIONS.has(path.extname(entry.name).toLowerCase())
+            ) {
+                total += 1
+            }
+        }
+    }
+
+    return total
+}
+
 const walkRoot = async (
     fastify: FastifyInstance,
     rootPath: string,
-    rootId: string
+    rootId: string,
+    onProgress?: (update: {
+        processedFiles: number
+        currentPath: string | null
+    }) => void,
+    initialProcessedFiles = 0
 ): Promise<number> => {
     let indexedCount = 0
+    let processedFiles = initialProcessedFiles
     const queue = [rootPath]
 
     while (queue.length) {
@@ -265,6 +311,11 @@ const walkRoot = async (
                 enrichedMetadata,
             })
             indexedCount += 1
+            processedFiles += 1
+            onProgress?.({
+                processedFiles,
+                currentPath: absolutePath,
+            })
         }
     }
 
@@ -273,7 +324,12 @@ const walkRoot = async (
 
 export const scanLibrary = async (
     fastify: FastifyInstance,
-    requestedRoots?: string[]
+    requestedRoots?: string[],
+    onProgress?: (update: {
+        totalFiles?: number
+        processedFiles?: number
+        currentPath?: string | null
+    }) => void
 ): Promise<ScanSummary> => {
     const configuredRoots = requestedRoots?.length
         ? requestedRoots
@@ -290,6 +346,27 @@ export const scanLibrary = async (
     let indexedCount = 0
     const skippedRoots: Array<{ root: string; reason: string }> = []
     const scannedRoots: string[] = []
+    let totalFiles = 0
+
+    for (const rootPath of uniqueRoots) {
+        try {
+            const stat = await fs.stat(rootPath)
+            if (!stat.isDirectory()) {
+                continue
+            }
+            totalFiles += await countVideoFiles(rootPath)
+        } catch {
+            continue
+        }
+    }
+
+    onProgress?.({
+        totalFiles,
+        processedFiles: 0,
+        currentPath: null,
+    })
+
+    let processedFiles = 0
 
     for (const rootPath of uniqueRoots) {
         try {
@@ -311,7 +388,19 @@ export const scanLibrary = async (
 
         const rootId = ensureRootFolder(fastify, rootPath)
         markRootUnavailable(fastify, rootPath)
-        indexedCount += await walkRoot(fastify, rootPath, rootId)
+        indexedCount += await walkRoot(
+            fastify,
+            rootPath,
+            rootId,
+            (update) => {
+                processedFiles = update.processedFiles
+                onProgress?.({
+                    processedFiles,
+                    currentPath: update.currentPath,
+                })
+            },
+            processedFiles
+        )
         scannedRoots.push(rootPath)
     }
 

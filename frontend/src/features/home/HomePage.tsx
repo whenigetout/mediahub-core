@@ -5,9 +5,13 @@ import { HomeFeed, SearchBar } from "./components"
 import {
     ConfiguredRoot,
     LibraryItem,
+    LibraryScanJobStatus,
     LibraryStats,
+    LibrarySuggestion,
     ScanSummary,
     SearchResponse,
+    SearchSort,
+    SuggestionsResponse,
 } from "./types"
 
 const backendOrigin =
@@ -19,15 +23,71 @@ const emptyStats: LibraryStats = {
     missingMetadataItems: 0,
 }
 
+const idleScanJob: LibraryScanJobStatus = {
+    jobId: "idle",
+    status: "idle",
+    roots: [],
+    totalFiles: 0,
+    processedFiles: 0,
+    currentPath: null,
+    startedAt: null,
+    finishedAt: null,
+    error: null,
+    summary: null,
+}
+
+type FiltersState = {
+    actress: string
+    tag: string
+    studio: string
+    code: string
+    metadataStatus: string
+    yearFrom: string
+    yearTo: string
+    sort: SearchSort
+    pageSize: number
+}
+
+const defaultFilters: FiltersState = {
+    actress: "",
+    tag: "",
+    studio: "",
+    code: "",
+    metadataStatus: "",
+    yearFrom: "",
+    yearTo: "",
+    sort: "relevance",
+    pageSize: 24,
+}
+
+const getProgressPercent = (scanJob: LibraryScanJobStatus) => {
+    if (!scanJob.totalFiles) {
+        return 0
+    }
+
+    return Math.min(
+        100,
+        Math.round((scanJob.processedFiles / scanJob.totalFiles) * 100)
+    )
+}
+
 export const HomePage = () => {
     const [query, setQuery] = useState("")
+    const [debouncedQuery, setDebouncedQuery] = useState("")
     const [rootsInput, setRootsInput] = useState("")
     const [roots, setRoots] = useState<ConfiguredRoot[]>([])
     const [results, setResults] = useState<LibraryItem[]>([])
     const [selectedVideo, setSelectedVideo] = useState<LibraryItem | null>(null)
     const [stats, setStats] = useState<LibraryStats>(emptyStats)
-    const [statusMessage, setStatusMessage] = useState("Ready to scan your local library.")
+    const [statusMessage, setStatusMessage] = useState(
+        "Ready to scan your local library."
+    )
     const [scanSummary, setScanSummary] = useState<ScanSummary | null>(null)
+    const [scanJob, setScanJob] = useState<LibraryScanJobStatus>(idleScanJob)
+    const [filters, setFilters] = useState<FiltersState>(defaultFilters)
+    const [page, setPage] = useState(1)
+    const [totalResults, setTotalResults] = useState(0)
+    const [suggestions, setSuggestions] = useState<LibrarySuggestion[]>([])
     const [isSearching, startSearchTransition] = useTransition()
     const [isScanning, startScanTransition] = useTransition()
 
@@ -39,6 +99,8 @@ export const HomePage = () => {
                 .filter(Boolean),
         [rootsInput]
     )
+
+    const pageCount = Math.max(1, Math.ceil(totalResults / filters.pageSize))
 
     const refreshRoots = async () => {
         const response = await fetch("/api/library/roots", { cache: "no-store" })
@@ -55,19 +117,69 @@ export const HomePage = () => {
         setStats(payload)
     }
 
-    const runSearch = (nextQuery: string) => {
+    const refreshScanJob = async () => {
+        const response = await fetch("/api/library/scan/current", {
+            cache: "no-store",
+        })
+        const payload = (await response.json()) as LibraryScanJobStatus
+        setScanJob(payload)
+
+        if (payload.status === "completed" && payload.summary) {
+            setScanSummary(payload.summary)
+            setStatusMessage(
+                `Scan finished. Indexed ${payload.summary.indexedCount} video files across ${payload.summary.roots.length} roots.`
+            )
+            await Promise.all([refreshRoots(), refreshStats()])
+        }
+
+        if (payload.status === "failed") {
+            setStatusMessage(payload.error ?? "Scan failed.")
+        }
+    }
+
+    const runSearch = (overrides?: Partial<FiltersState> & { query?: string; page?: number }) => {
+        const nextQuery = overrides?.query ?? debouncedQuery
+        const nextPage = overrides?.page ?? page
+        const nextFilters = {
+            ...filters,
+            ...overrides,
+        }
+
         startSearchTransition(async () => {
             const params = new URLSearchParams()
             if (nextQuery.trim()) {
                 params.set("q", nextQuery.trim())
             }
 
+            const filterEntries: Array<[string, string]> = [
+                ["actress", nextFilters.actress],
+                ["tag", nextFilters.tag],
+                ["studio", nextFilters.studio],
+                ["code", nextFilters.code],
+                ["metadataStatus", nextFilters.metadataStatus],
+                ["yearFrom", nextFilters.yearFrom],
+                ["yearTo", nextFilters.yearTo],
+                ["sort", nextFilters.sort],
+            ]
+
+            for (const [key, value] of filterEntries) {
+                if (value.trim()) {
+                    params.set(key, value.trim())
+                }
+            }
+
+            params.set("limit", String(nextFilters.pageSize))
+            params.set("offset", String((nextPage - 1) * nextFilters.pageSize))
+
             const response = await fetch(`/api/library/search?${params.toString()}`, {
                 cache: "no-store",
             })
             const payload = (await response.json()) as SearchResponse
-            setQuery(nextQuery)
+
             setResults(payload.items)
+            setTotalResults(payload.total)
+            setPage(nextPage)
+            setFilters(nextFilters)
             setSelectedVideo((current) => {
                 if (current && payload.items.some((item) => item.id === current.id)) {
                     return payload.items.find((item) => item.id === current.id) ?? current
@@ -77,16 +189,32 @@ export const HomePage = () => {
             })
             setStatusMessage(
                 payload.total
-                    ? `Showing ${payload.items.length} of ${payload.total} indexed videos.`
+                    ? `Showing page ${nextPage} of ${Math.max(
+                          1,
+                          Math.ceil(payload.total / payload.limit)
+                      )}. ${payload.total} indexed videos matched.`
                     : "No indexed videos matched that search yet."
             )
         })
     }
 
+    const runSuggestions = async (value: string) => {
+        if (!value.trim()) {
+            setSuggestions([])
+            return
+        }
+
+        const response = await fetch(
+            `/api/library/suggestions?q=${encodeURIComponent(value.trim())}`,
+            { cache: "no-store" }
+        )
+        const payload = (await response.json()) as SuggestionsResponse
+        setSuggestions(payload.suggestions)
+    }
+
     const runScan = () => {
         startScanTransition(async () => {
-            setStatusMessage("Scanning library roots and updating the local index...")
-
+            setStatusMessage("Starting scan...")
             const response = await fetch("/api/library/scan", {
                 method: "POST",
                 headers: {
@@ -97,19 +225,14 @@ export const HomePage = () => {
                 }),
             })
 
-            const payload = (await response.json()) as ScanSummary
-            setScanSummary(payload)
-
+            const payload = (await response.json()) as LibraryScanJobStatus
+            setScanJob(payload)
             if (!response.ok) {
-                setStatusMessage("Scan failed. Check the skipped roots list and try again.")
+                setStatusMessage(payload.error ?? "Unable to start scan.")
                 return
             }
 
-            await Promise.all([refreshRoots(), refreshStats()])
-            await runSearch(query)
-            setStatusMessage(
-                `Scan finished. Indexed ${payload.indexedCount} video files across ${payload.roots.length} roots.`
-            )
+            setStatusMessage("Scan started. Building a fresh index from your selected roots...")
         })
     }
 
@@ -119,12 +242,59 @@ export const HomePage = () => {
         })
         await refreshRoots()
         await refreshStats()
-        setStatusMessage("Removed the root from saved configuration. Indexed items from that root are now marked unavailable.")
+        setStatusMessage(
+            "Removed the root from saved configuration. Indexed items from that root are now marked unavailable."
+        )
     }
 
     useEffect(() => {
-        void Promise.all([refreshRoots(), refreshStats()]).then(() => runSearch(""))
+        const timer = window.setTimeout(() => {
+            setDebouncedQuery(query)
+        }, 250)
+
+        return () => window.clearTimeout(timer)
+    }, [query])
+
+    useEffect(() => {
+        const timer = window.setTimeout(() => {
+            void runSuggestions(query)
+        }, 150)
+
+        return () => window.clearTimeout(timer)
+    }, [query])
+
+    useEffect(() => {
+        void Promise.all([refreshRoots(), refreshStats(), refreshScanJob()]).then(() =>
+            runSearch({ query: "", page: 1 })
+        )
     }, [])
+
+    useEffect(() => {
+        void runSearch({ query: debouncedQuery, page: 1 })
+    }, [
+        debouncedQuery,
+        filters.actress,
+        filters.tag,
+        filters.studio,
+        filters.code,
+        filters.metadataStatus,
+        filters.yearFrom,
+        filters.yearTo,
+        filters.sort,
+        filters.pageSize,
+    ])
+
+    useEffect(() => {
+        if (scanJob.status !== "queued" && scanJob.status !== "running") {
+            return
+        }
+
+        const interval = window.setInterval(() => {
+            void refreshScanJob()
+        }, 700)
+
+        return () => window.clearInterval(interval)
+    }, [scanJob.status])
 
     return (
         <div style={styles.page}>
@@ -133,8 +303,8 @@ export const HomePage = () => {
                     <div style={styles.kicker}>Local Index + Real Files</div>
                     <h1 style={styles.title}>MediaHub Library</h1>
                     <p style={styles.subtitle}>
-                        Point the app at your real folders, scan them into the local index,
-                        and search the results immediately.
+                        Scan real folders into a local search index, search as you type,
+                        and page through results with basic filters and sorting.
                     </p>
                 </div>
 
@@ -160,7 +330,7 @@ export const HomePage = () => {
                         <h2 style={styles.panelTitle}>Library Roots</h2>
                         <p style={styles.panelText}>
                             Add one folder path per line. Scans update the index without
-                            replacing your original files.
+                            touching your original files.
                         </p>
                         <textarea
                             value={rootsInput}
@@ -171,11 +341,134 @@ export const HomePage = () => {
                         <button
                             type="button"
                             onClick={runScan}
-                            disabled={isScanning}
+                            disabled={isScanning || scanJob.status === "running" || scanJob.status === "queued"}
                             style={styles.primaryButton}
                         >
-                            {isScanning ? "Scanning..." : "Scan Library"}
+                            {scanJob.status === "running" || scanJob.status === "queued"
+                                ? "Scanning..."
+                                : "Scan Library"}
                         </button>
+
+                        {(scanJob.status === "running" || scanJob.status === "queued") && (
+                            <div style={styles.progressWrap}>
+                                <div style={styles.progressMeta}>
+                                    <span>
+                                        {scanJob.processedFiles} / {scanJob.totalFiles || "?"} files
+                                    </span>
+                                    <span>{getProgressPercent(scanJob)}%</span>
+                                </div>
+                                <div style={styles.progressBarTrack}>
+                                    <div
+                                        style={{
+                                            ...styles.progressBarFill,
+                                            width: `${getProgressPercent(scanJob)}%`,
+                                        }}
+                                    />
+                                </div>
+                                <div style={styles.progressPath}>
+                                    {scanJob.currentPath ?? "Preparing scan..."}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
+                    <div style={styles.panel}>
+                        <h2 style={styles.panelTitle}>Filters</h2>
+                        <div style={styles.filterGrid}>
+                            <input
+                                value={filters.actress}
+                                onChange={(event) =>
+                                    setFilters((current) => ({ ...current, actress: event.target.value }))
+                                }
+                                placeholder="Actress"
+                                style={styles.filterInput}
+                            />
+                            <input
+                                value={filters.tag}
+                                onChange={(event) =>
+                                    setFilters((current) => ({ ...current, tag: event.target.value }))
+                                }
+                                placeholder="Tag"
+                                style={styles.filterInput}
+                            />
+                            <input
+                                value={filters.studio}
+                                onChange={(event) =>
+                                    setFilters((current) => ({ ...current, studio: event.target.value }))
+                                }
+                                placeholder="Studio"
+                                style={styles.filterInput}
+                            />
+                            <input
+                                value={filters.code}
+                                onChange={(event) =>
+                                    setFilters((current) => ({ ...current, code: event.target.value }))
+                                }
+                                placeholder="Code"
+                                style={styles.filterInput}
+                            />
+                            <select
+                                value={filters.metadataStatus}
+                                onChange={(event) =>
+                                    setFilters((current) => ({
+                                        ...current,
+                                        metadataStatus: event.target.value,
+                                    }))
+                                }
+                                style={styles.filterInput}
+                            >
+                                <option value="">Any metadata</option>
+                                <option value="partial">Partial metadata</option>
+                                <option value="missing">Missing metadata</option>
+                            </select>
+                            <select
+                                value={filters.sort}
+                                onChange={(event) =>
+                                    setFilters((current) => ({
+                                        ...current,
+                                        sort: event.target.value as SearchSort,
+                                    }))
+                                }
+                                style={styles.filterInput}
+                            >
+                                <option value="relevance">Sort: Relevance</option>
+                                <option value="recent">Sort: Recent scan</option>
+                                <option value="title">Sort: Title</option>
+                                <option value="year">Sort: Year</option>
+                                <option value="runtime">Sort: Runtime</option>
+                            </select>
+                            <input
+                                value={filters.yearFrom}
+                                onChange={(event) =>
+                                    setFilters((current) => ({ ...current, yearFrom: event.target.value }))
+                                }
+                                placeholder="Year from"
+                                style={styles.filterInput}
+                            />
+                            <input
+                                value={filters.yearTo}
+                                onChange={(event) =>
+                                    setFilters((current) => ({ ...current, yearTo: event.target.value }))
+                                }
+                                placeholder="Year to"
+                                style={styles.filterInput}
+                            />
+                            <select
+                                value={String(filters.pageSize)}
+                                onChange={(event) =>
+                                    setFilters((current) => ({
+                                        ...current,
+                                        pageSize: Number.parseInt(event.target.value, 10),
+                                    }))
+                                }
+                                style={styles.filterInput}
+                            >
+                                <option value="12">12 / page</option>
+                                <option value="24">24 / page</option>
+                                <option value="48">48 / page</option>
+                                <option value="96">96 / page</option>
+                            </select>
+                        </div>
                     </div>
 
                     <div style={styles.panel}>
@@ -204,7 +497,8 @@ export const HomePage = () => {
                         <div style={styles.panel}>
                             <h2 style={styles.panelTitle}>Last Scan</h2>
                             <p style={styles.panelText}>
-                                Indexed {scanSummary.indexedCount} files. Marked unavailable: {scanSummary.unavailableCount}.
+                                Indexed {scanSummary.indexedCount} files. Marked unavailable:{" "}
+                                {scanSummary.unavailableCount}.
                             </p>
                             {scanSummary.skippedRoots.map((item) => (
                                 <div key={item.root} style={styles.warningBox}>
@@ -219,11 +513,29 @@ export const HomePage = () => {
                 <section style={styles.main}>
                     <div style={styles.panel}>
                         <div style={styles.searchRow}>
-                            <SearchBar onSearch={runSearch} placeholder="Search title, code, actress, studio, tags..." />
+                            <SearchBar
+                                query={query}
+                                onQueryChange={setQuery}
+                                onSearch={(value) => {
+                                    setQuery(value)
+                                    setDebouncedQuery(value)
+                                    setSuggestions([])
+                                    void runSearch({ query: value, page: 1 })
+                                }}
+                                suggestions={suggestions}
+                                onSuggestionSelect={(value) => {
+                                    setQuery(value)
+                                    setDebouncedQuery(value)
+                                    setSuggestions([])
+                                    void runSearch({ query: value, page: 1 })
+                                }}
+                                isSearching={isSearching}
+                                placeholder="Search title, code, actress, studio, tags..."
+                            />
                             <button
                                 type="button"
                                 style={styles.secondaryButton}
-                                onClick={() => runSearch(query)}
+                                onClick={() => runSearch({ query, page: 1 })}
                             >
                                 Refresh
                             </button>
@@ -231,6 +543,28 @@ export const HomePage = () => {
                         <p style={styles.statusLine}>
                             {isSearching ? "Searching..." : statusMessage}
                         </p>
+                    </div>
+
+                    <div style={styles.paginationRow}>
+                        <button
+                            type="button"
+                            style={styles.secondaryButton}
+                            disabled={page <= 1}
+                            onClick={() => runSearch({ page: page - 1 })}
+                        >
+                            Previous
+                        </button>
+                        <span style={styles.paginationText}>
+                            Page {page} of {pageCount}
+                        </span>
+                        <button
+                            type="button"
+                            style={styles.secondaryButton}
+                            disabled={page >= pageCount}
+                            onClick={() => runSearch({ page: page + 1 })}
+                        >
+                            Next
+                        </button>
                     </div>
 
                     <div style={styles.contentGrid}>
@@ -264,7 +598,8 @@ export const HomePage = () => {
                                                 .join(" • ") || selectedVideo.relativePath}
                                         </div>
                                         <div style={styles.metaLine}>
-                                            {selectedVideo.actresses.join(", ") || "No actress metadata yet"}
+                                            {selectedVideo.actresses.join(", ") ||
+                                                "No actress metadata yet"}
                                         </div>
                                         <div style={styles.pathBox}>{selectedVideo.videoPath}</div>
                                         {selectedVideo.plot ? (
@@ -429,6 +764,19 @@ const styles = {
         wordBreak: "break-all" as const,
         color: "#cbd5e1",
     },
+    filterGrid: {
+        display: "grid",
+        gridTemplateColumns: "1fr 1fr",
+        gap: "10px",
+    },
+    filterInput: {
+        width: "100%",
+        padding: "10px 12px",
+        borderRadius: "12px",
+        border: "1px solid rgba(148, 163, 184, 0.18)",
+        background: "#020617",
+        color: "#e2e8f0",
+    },
     warningBox: {
         display: "flex",
         flexDirection: "column" as const,
@@ -439,6 +787,35 @@ const styles = {
         background: "rgba(127, 29, 29, 0.35)",
         color: "#fecaca",
     },
+    progressWrap: {
+        marginTop: "14px",
+        display: "flex",
+        flexDirection: "column" as const,
+        gap: "8px",
+    },
+    progressMeta: {
+        display: "flex",
+        justifyContent: "space-between",
+        fontSize: "12px",
+        color: "#cbd5e1",
+    },
+    progressBarTrack: {
+        width: "100%",
+        height: "10px",
+        borderRadius: "999px",
+        background: "rgba(30, 41, 59, 0.9)",
+        overflow: "hidden",
+    },
+    progressBarFill: {
+        height: "100%",
+        borderRadius: "999px",
+        background: "linear-gradient(90deg, #38bdf8, #22c55e)",
+    },
+    progressPath: {
+        fontSize: "12px",
+        color: "#93c5fd",
+        wordBreak: "break-all" as const,
+    },
     searchRow: {
         display: "flex",
         gap: "10px",
@@ -447,6 +824,16 @@ const styles = {
     statusLine: {
         margin: "12px 0 0",
         color: "#94a3b8",
+    },
+    paginationRow: {
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        gap: "12px",
+    },
+    paginationText: {
+        color: "#cbd5e1",
+        fontSize: "14px",
     },
     contentGrid: {
         display: "grid",

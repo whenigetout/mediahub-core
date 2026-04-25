@@ -5,6 +5,9 @@ export type LibrarySearchParams = {
     studio?: string
     code?: string
     metadataStatus?: string
+    yearFrom?: number
+    yearTo?: number
+    sort?: "relevance" | "title" | "year" | "runtime" | "recent"
     limit?: number
     offset?: number
 }
@@ -51,6 +54,24 @@ export type ScanSummary = {
         root: string
         reason: string
     }>
+}
+
+export type LibrarySuggestion = {
+    value: string
+    kind: "title" | "code" | "actress" | "tag" | "studio"
+}
+
+export type LibraryScanJobStatus = {
+    jobId: string
+    status: "idle" | "queued" | "running" | "completed" | "failed"
+    roots: string[]
+    totalFiles: number
+    processedFiles: number
+    currentPath: string | null
+    startedAt: string | null
+    finishedAt: string | null
+    error: string | null
+    summary: ScanSummary | null
 }
 
 export type ConfiguredLibraryRoot = {

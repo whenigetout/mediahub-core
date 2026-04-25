@@ -5,6 +5,7 @@ import {
     LibraryItem,
     LibrarySearchParams,
     LibrarySearchResult,
+    LibrarySuggestion,
     ScanCandidate,
 } from "./library.types"
 
@@ -464,6 +465,16 @@ export const searchLibrary = (
     addLikeFilter("LOWER(COALESCE(studio, ''))", params.studio)
     addLikeFilter("LOWER(COALESCE(code, ''))", params.code)
 
+    if (typeof params.yearFrom === "number" && Number.isFinite(params.yearFrom)) {
+        whereClauses.push("year >= ?")
+        values.push(params.yearFrom)
+    }
+
+    if (typeof params.yearTo === "number" && Number.isFinite(params.yearTo)) {
+        whereClauses.push("year <= ?")
+        values.push(params.yearTo)
+    }
+
     if (params.metadataStatus?.trim()) {
         whereClauses.push("metadata_status = ?")
         values.push(params.metadataStatus.trim().toLowerCase())
@@ -472,6 +483,28 @@ export const searchLibrary = (
     const whereSql = whereClauses.length
         ? `WHERE ${whereClauses.join(" AND ")}`
         : ""
+
+    const sortSql = (() => {
+        switch (params.sort) {
+            case "title":
+                return "title COLLATE NOCASE ASC, filename COLLATE NOCASE ASC"
+            case "year":
+                return "year DESC, title COLLATE NOCASE ASC, filename COLLATE NOCASE ASC"
+            case "runtime":
+                return "runtime_minutes DESC, title COLLATE NOCASE ASC, filename COLLATE NOCASE ASC"
+            case "recent":
+                return "last_scanned_at DESC, title COLLATE NOCASE ASC, filename COLLATE NOCASE ASC"
+            case "relevance":
+            default:
+                return `
+                    CASE WHEN code IS NULL THEN 1 ELSE 0 END,
+                    CASE WHEN title IS NULL THEN 1 ELSE 0 END,
+                    last_scanned_at DESC,
+                    title COLLATE NOCASE ASC,
+                    filename COLLATE NOCASE ASC
+                `
+        }
+    })()
 
     const total = (
         fastify.db
@@ -511,11 +544,7 @@ export const searchLibrary = (
                 last_scanned_at
             FROM library_item
             ${whereSql}
-            ORDER BY
-                CASE WHEN code IS NULL THEN 1 ELSE 0 END,
-                last_scanned_at DESC,
-                title COLLATE NOCASE ASC,
-                filename COLLATE NOCASE ASC
+            ORDER BY ${sortSql}
             LIMIT ?
             OFFSET ?
             `
@@ -528,6 +557,80 @@ export const searchLibrary = (
         limit,
         offset,
     }
+}
+
+export const getLibrarySuggestions = (
+    fastify: FastifyInstance,
+    query: string
+): LibrarySuggestion[] => {
+    const normalized = query.trim().toLowerCase()
+    if (!normalized) {
+        return []
+    }
+
+    const rows = fastify.db
+        .prepare(
+            `
+            SELECT
+                title,
+                code,
+                studio,
+                actresses,
+                tags
+            FROM library_item
+            WHERE is_available = 1
+              AND search_text LIKE ?
+            ORDER BY last_scanned_at DESC
+            LIMIT 20
+            `
+        )
+        .all(`%${normalized}%`) as Array<{
+        title: string | null
+        code: string | null
+        studio: string | null
+        actresses: string
+        tags: string
+    }>
+
+    const suggestions: LibrarySuggestion[] = []
+    const seen = new Set<string>()
+    const pushSuggestion = (
+        value: string | null,
+        kind: LibrarySuggestion["kind"]
+    ) => {
+        const normalizedValue = value?.trim()
+        if (!normalizedValue) {
+            return
+        }
+
+        if (!normalizedValue.toLowerCase().includes(normalized)) {
+            return
+        }
+
+        const key = `${kind}:${normalizedValue.toLowerCase()}`
+        if (seen.has(key)) {
+            return
+        }
+
+        seen.add(key)
+        suggestions.push({ value: normalizedValue, kind })
+    }
+
+    for (const row of rows) {
+        pushSuggestion(row.title, "title")
+        pushSuggestion(row.code, "code")
+        pushSuggestion(row.studio, "studio")
+
+        for (const actress of parseJsonArray(row.actresses)) {
+            pushSuggestion(actress, "actress")
+        }
+
+        for (const tag of parseJsonArray(row.tags)) {
+            pushSuggestion(tag, "tag")
+        }
+    }
+
+    return suggestions.slice(0, 8)
 }
 
 export const getMetadataByCode = (

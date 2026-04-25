@@ -28,6 +28,8 @@ export type SearchResponse = {
     offset: number
 }
 
+export type SearchSort = "relevance" | "title" | "year" | "runtime" | "recent"
+
 export type ConfiguredRoot = {
     id: string
     path: string
@@ -51,4 +53,26 @@ export type LibraryStats = {
     totalItems: number
     availableItems: number
     missingMetadataItems: number
+}
+
+export type LibrarySuggestion = {
+    value: string
+    kind: "title" | "code" | "actress" | "tag" | "studio"
+}
+
+export type SuggestionsResponse = {
+    suggestions: LibrarySuggestion[]
+}
+
+export type LibraryScanJobStatus = {
+    jobId: string
+    status: "idle" | "queued" | "running" | "completed" | "failed"
+    roots: string[]
+    totalFiles: number
+    processedFiles: number
+    currentPath: string | null
+    startedAt: string | null
+    finishedAt: string | null
+    error: string | null
+    summary: ScanSummary | null
 }

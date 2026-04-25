@@ -2,12 +2,14 @@ import { FastifyInstance } from "fastify"
 import { createReadStream, promises as fs } from "fs"
 import path from "path"
 import {
+    fetchCurrentScanJob,
     fetchConfiguredRoots,
     fetchLibraryItem,
     fetchLibrarySearchResults,
+    fetchLibrarySuggestions,
     fetchLibraryStats,
     removeConfiguredRoot,
-    runLibraryScan,
+    startLibraryScan,
 } from "./library.service"
 import { LibrarySearchParams, ScanRequest } from "./library.types"
 
@@ -52,6 +54,10 @@ export async function libraryRoutes(fastify: FastifyInstance) {
         return fetchLibraryStats(fastify)
     })
 
+    fastify.get("/library/scan/current", async () => {
+        return fetchCurrentScanJob()
+    })
+
     fastify.get("/library/search", async (request) => {
         const query = request.query as Record<string, string | undefined>
 
@@ -62,6 +68,9 @@ export async function libraryRoutes(fastify: FastifyInstance) {
             studio: query.studio,
             code: query.code,
             metadataStatus: query.metadataStatus,
+            yearFrom: query.yearFrom ? Number.parseInt(query.yearFrom, 10) : undefined,
+            yearTo: query.yearTo ? Number.parseInt(query.yearTo, 10) : undefined,
+            sort: (query.sort as LibrarySearchParams["sort"]) ?? undefined,
             limit: query.limit ? Number.parseInt(query.limit, 10) : undefined,
             offset: query.offset ? Number.parseInt(query.offset, 10) : undefined,
         }
@@ -69,15 +78,17 @@ export async function libraryRoutes(fastify: FastifyInstance) {
         return fetchLibrarySearchResults(fastify, params)
     })
 
+    fastify.get("/library/suggestions", async (request) => {
+        const { q } = request.query as { q?: string }
+        return {
+            suggestions: fetchLibrarySuggestions(fastify, q ?? ""),
+        }
+    })
+
     fastify.post("/library/scan", async (request, reply) => {
         const body = (request.body ?? {}) as ScanRequest
-        const result = await runLibraryScan(fastify, body.roots)
-
-        if (!result.roots.length && result.skippedRoots.length) {
-            return reply.code(400).send(result)
-        }
-
-        return result
+        const scanJob = startLibraryScan(fastify, body.roots)
+        return reply.code(202).send(scanJob)
     })
 
     fastify.get("/library/items/:id", async (request, reply) => {
