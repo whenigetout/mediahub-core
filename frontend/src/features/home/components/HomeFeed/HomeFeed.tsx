@@ -1,20 +1,24 @@
 "use client"
 
 import { VideoCard } from "./VideoCard"
-import { mockVideos } from "./mockData"
 import { Video } from "./types"
 
 type Props = {
-    videos?: Video[]
+    videos: Video[]
+    selectedVideoId?: string | null
+    onSelect: (video: Video) => void
 }
 
-export const HomeFeed = ({ videos }: Props) => {
-    const data = videos ?? mockVideos
-
+export const HomeFeed = ({ videos, selectedVideoId, onSelect }: Props) => {
     return (
         <div style={styles.grid}>
-            {data.map((video) => (
-                <VideoCard key={video.id} video={video} />
+            {videos.map((video) => (
+                <VideoCard
+                    key={video.id}
+                    video={video}
+                    isSelected={selectedVideoId === video.id}
+                    onSelect={onSelect}
+                />
             ))}
         </div>
     )

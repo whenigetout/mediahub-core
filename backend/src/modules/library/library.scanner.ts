@@ -210,7 +210,8 @@ const buildCandidate = async (
 
 const walkRoot = async (
     fastify: FastifyInstance,
-    rootPath: string
+    rootPath: string,
+    rootId: string
 ): Promise<number> => {
     let indexedCount = 0
     const queue = [rootPath]
@@ -259,7 +260,7 @@ const walkRoot = async (
                   ? getMetadataByCode(fastify, candidate.enrichedMetadata.code)
                   : null
 
-            upsertScanCandidate(fastify, {
+            upsertScanCandidate(fastify, rootId, {
                 ...candidate,
                 enrichedMetadata,
             })
@@ -308,9 +309,9 @@ export const scanLibrary = async (
             continue
         }
 
-        ensureRootFolder(fastify, rootPath)
+        const rootId = ensureRootFolder(fastify, rootPath)
         markRootUnavailable(fastify, rootPath)
-        indexedCount += await walkRoot(fastify, rootPath)
+        indexedCount += await walkRoot(fastify, rootPath, rootId)
         scannedRoots.push(rootPath)
     }
 

@@ -1,9 +1,1 @@
-<movie>
-  <title>ABP-123 Sample Title</title>
-  <plot>Demo plot for scan verification.</plot>
-  <runtime>118</runtime>
-  <year>2023</year>
-  <studio>Demo Studio</studio>
-  <tag>demo</tag>
-  <actor><name>Mio Sample</name></actor>
-</movie>
+<movie><title>ABP-123 Sample Title</title><plot>Demo plot for scan verification.</plot><runtime>118</runtime><year>2023</year><studio>Demo Studio</studio><tag>demo</tag><actor><name>Mio Sample</name></actor></movie>

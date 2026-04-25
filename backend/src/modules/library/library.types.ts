@@ -53,6 +53,17 @@ export type ScanSummary = {
     }>
 }
 
+export type ConfiguredLibraryRoot = {
+    id: string
+    path: string
+}
+
+export type LibraryStats = {
+    totalItems: number
+    availableItems: number
+    missingMetadataItems: number
+}
+
 export type ParsedNfo = {
     title: string | null
     plot: string | null

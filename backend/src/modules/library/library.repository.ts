@@ -8,7 +8,8 @@ import {
     ScanCandidate,
 } from "./library.types"
 
-type RootFolderRow = {
+type LibraryRootRow = {
+    id: string
     path: string
 }
 
@@ -105,11 +106,11 @@ export const getConfiguredRoots = (fastify: FastifyInstance): string[] => {
         .prepare(
             `
             SELECT path
-            FROM root_folder
+            FROM library_root
             ORDER BY path ASC
             `
         )
-        .all() as RootFolderRow[]
+        .all() as LibraryRootRow[]
 
     return rows.map((row) => row.path)
 }
@@ -118,34 +119,36 @@ export const ensureRootFolder = (
     fastify: FastifyInstance,
     rootPath: string
 ) => {
+    const existingRoot = fastify.db
+        .prepare(
+            `
+            SELECT id
+            FROM library_root
+            WHERE path = ?
+            `
+        )
+        .get(rootPath) as LibraryRootRow | undefined
+
+    const rootId = existingRoot?.id ?? randomUUID()
+
     fastify.db
         .prepare(
             `
-            INSERT INTO root_folder (id, path, label, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            INSERT INTO library_root (id, path, created_at, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             ON CONFLICT(path) DO UPDATE SET
-                label = excluded.label,
-                status = excluded.status,
                 updated_at = CURRENT_TIMESTAMP
             `
         )
-        .run(rootPath, rootPath, rootPath, "ready")
+        .run(rootId, rootPath)
+
+    return rootId
 }
 
 export const markRootUnavailable = (
     fastify: FastifyInstance,
     rootPath: string
 ) => {
-    fastify.db
-        .prepare(
-            `
-            UPDATE media_file
-            SET is_indexed = 0, updated_at = CURRENT_TIMESTAMP
-            WHERE path LIKE ?
-            `
-        )
-        .run(`${rootPath}%`)
-
     fastify.db
         .prepare(
             `
@@ -159,6 +162,7 @@ export const markRootUnavailable = (
 
 export const upsertScanCandidate = (
     fastify: FastifyInstance,
+    rootId: string,
     candidate: ScanCandidate
 ) => {
     const actresses = [
@@ -204,69 +208,17 @@ export const upsertScanCandidate = (
         plot,
     })
 
-    const existingMediaFile = fastify.db
+    const existingItem = fastify.db
         .prepare(
             `
             SELECT id
-            FROM media_file
-            WHERE path = ?
+            FROM library_item
+            WHERE video_path = ?
             `
         )
         .get(candidate.videoPath) as { id: string } | undefined
 
-    const mediaFileId = existingMediaFile?.id ?? randomUUID()
-    const metadataPayload = JSON.stringify({
-        source: "scan",
-        title,
-        code,
-        studio,
-        actresses: uniqueActresses,
-        tags: uniqueTags,
-        plot,
-        year,
-        runtimeMinutes,
-        thumbnailPath: candidate.thumbnailPath,
-        nfoPath: candidate.nfoPath,
-    })
-
-    fastify.db
-        .prepare(
-            `
-            INSERT INTO media_file (
-                id,
-                root_folder_id,
-                path,
-                filename,
-                filesize,
-                mtime,
-                is_indexed,
-                metadata_,
-                metadata_fetched,
-                created_at,
-                updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            ON CONFLICT(path) DO UPDATE SET
-                root_folder_id = excluded.root_folder_id,
-                filename = excluded.filename,
-                filesize = excluded.filesize,
-                mtime = excluded.mtime,
-                is_indexed = 1,
-                metadata_ = excluded.metadata_,
-                metadata_fetched = excluded.metadata_fetched,
-                updated_at = CURRENT_TIMESTAMP
-            `
-        )
-        .run(
-            mediaFileId,
-            candidate.rootPath,
-            candidate.videoPath,
-            candidate.filename,
-            candidate.fileSize,
-            candidate.modifiedAt,
-            metadataPayload,
-            metadataStatus !== "missing" ? 1 : 0
-        )
+    const itemId = existingItem?.id ?? randomUUID()
 
     fastify.db
         .prepare(
@@ -274,6 +226,7 @@ export const upsertScanCandidate = (
             INSERT INTO library_item (
                 id,
                 media_file_id,
+                library_root_id,
                 root_path,
                 relative_path,
                 video_path,
@@ -299,11 +252,13 @@ export const upsertScanCandidate = (
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             ON CONFLICT(video_path) DO UPDATE SET
                 media_file_id = excluded.media_file_id,
+                library_root_id = excluded.library_root_id,
                 root_path = excluded.root_path,
                 relative_path = excluded.relative_path,
+                video_path = excluded.video_path,
                 filename = excluded.filename,
                 title = excluded.title,
                 code = excluded.code,
@@ -327,8 +282,9 @@ export const upsertScanCandidate = (
             `
         )
         .run(
-            mediaFileId,
-            mediaFileId,
+            itemId,
+            itemId,
+            rootId,
             candidate.rootPath,
             candidate.relativePath,
             candidate.videoPath,
@@ -350,6 +306,105 @@ export const upsertScanCandidate = (
             candidate.fileSize,
             candidate.modifiedAt
         )
+}
+
+export const getLibraryItemById = (
+    fastify: FastifyInstance,
+    id: string
+) => {
+    const row = fastify.db
+        .prepare(
+            `
+            SELECT
+                id,
+                video_path,
+                root_path,
+                relative_path,
+                filename,
+                title,
+                code,
+                studio,
+                actresses,
+                tags,
+                plot,
+                year,
+                runtime_minutes,
+                thumbnail_path,
+                nfo_path,
+                metadata_status,
+                is_available,
+                file_size,
+                modified_at,
+                last_scanned_at
+            FROM library_item
+            WHERE id = ?
+            `
+        )
+        .get(id) as LibraryItemRow | undefined
+
+    return row ? mapLibraryItem(row) : null
+}
+
+export const listConfiguredRoots = (fastify: FastifyInstance) => {
+    const rows = fastify.db
+        .prepare(
+            `
+            SELECT id, path
+            FROM library_root
+            ORDER BY path ASC
+            `
+        )
+        .all() as LibraryRootRow[]
+
+    return rows
+}
+
+export const deleteConfiguredRoot = (
+    fastify: FastifyInstance,
+    rootId: string
+) => {
+    fastify.db
+        .prepare(
+            `
+            DELETE FROM library_root
+            WHERE id = ?
+            `
+        )
+        .run(rootId)
+
+    fastify.db
+        .prepare(
+            `
+            UPDATE library_item
+            SET is_available = 0, updated_at = CURRENT_TIMESTAMP
+            WHERE library_root_id = ?
+            `
+        )
+        .run(rootId)
+}
+
+export const getLibraryStats = (fastify: FastifyInstance) => {
+    const row = fastify.db
+        .prepare(
+            `
+            SELECT
+                COUNT(*) AS totalItems,
+                SUM(CASE WHEN is_available = 1 THEN 1 ELSE 0 END) AS availableItems,
+                SUM(CASE WHEN metadata_status = 'missing' THEN 1 ELSE 0 END) AS missingMetadataItems
+            FROM library_item
+            `
+        )
+        .get() as {
+        totalItems: number | null
+        availableItems: number | null
+        missingMetadataItems: number | null
+    }
+
+    return {
+        totalItems: row.totalItems ?? 0,
+        availableItems: row.availableItems ?? 0,
+        missingMetadataItems: row.missingMetadataItems ?? 0,
+    }
 }
 
 export const getUnavailableCount = (
