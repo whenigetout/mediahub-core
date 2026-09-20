@@ -4,7 +4,7 @@ import {
     LibrarySearchParams,
     NaturalLanguageSearchResponse,
 } from "./library.types"
-import { searchLibrary } from "./library.repository"
+import { findMatchingTags, searchLibrary } from "./library.repository"
 
 const DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
 const DEFAULT_OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
@@ -13,6 +13,7 @@ const normalizeText = (value: string) =>
     value
         .trim()
         .toLowerCase()
+        .replace(/[-_/]+/g, " ")
         .replace(/\s+/g, " ")
 
 const parseCommaList = (value: string) =>
@@ -20,6 +21,72 @@ const parseCommaList = (value: string) =>
         .split(/[,+]/)
         .map((part) => part.trim())
         .filter(Boolean)
+
+const STOP_WORDS = new Set([
+    "show",
+    "me",
+    "all",
+    "the",
+    "a",
+    "an",
+    "some",
+    "videos",
+    "video",
+    "scenes",
+    "scene",
+    "with",
+    "without",
+    "any",
+    "actress",
+    "actors",
+    "kind",
+    "type",
+    "probably",
+    "that",
+    "have",
+    "this",
+    "those",
+    "these",
+    "please",
+])
+
+const THEME_HINT_WORDS = new Set([
+    "nurse",
+    "nursing",
+    "breastfeed",
+    "breastfeeding",
+    "breast",
+    "clinic",
+    "hospital",
+    "teacher",
+    "school",
+    "maid",
+    "office",
+    "romance",
+    "doctor",
+    "cosplay",
+])
+
+const INTENSITY_HINT_WORDS = new Set([
+    "intense",
+    "heavy",
+    "hardcore",
+    "rough",
+    "extreme",
+    "soft",
+    "gentle",
+])
+
+const cleanParsedParams = (parsed: LibrarySearchParams): LibrarySearchParams => ({
+    ...parsed,
+    includeTags: Array.from(
+        new Set((parsed.includeTags ?? []).map((value) => value.trim()).filter(Boolean))
+    ),
+    excludeTags: Array.from(
+        new Set((parsed.excludeTags ?? []).map((value) => value.trim()).filter(Boolean))
+    ),
+    sort: parsed.sort ?? "relevance",
+})
 
 const parseHeuristicQuery = (input: string): LibrarySearchParams => {
     const normalized = normalizeText(input)
@@ -70,44 +137,89 @@ const parseHeuristicQuery = (input: string): LibrarySearchParams => {
         parsed.excludeTags = parseCommaList(excludeTagMatch[1])
     }
 
+    const themedMatches = normalized.matchAll(/\b([a-z0-9]+)\s+themed\b/gi)
+    for (const match of themedMatches) {
+        parsed.includeTags?.push(match[1])
+    }
+
     const stripped = normalized
+        .replace(/\bshow\b/gi, "")
         .replace(/with actress [a-z0-9\s.'-]+/i, "")
+        .replace(/with any actress/gi, "")
+        .replace(/with no actress preference/gi, "")
         .replace(/studio [a-z0-9\s.'-]+/i, "")
         .replace(/from \d{4} to \d{4}/i, "")
         .replace(/after \d{4}/i, "")
         .replace(/before \d{4}/i, "")
         .replace(/without [a-z0-9\s,+-]+/i, "")
         .replace(/(?:tag|tags|feeling|mood) [a-z0-9\s,+-]+/i, "")
+        .replace(/\b[a-z0-9]+\s+themed\b/gi, "")
         .replace(/\bshow me\b/gi, "")
         .replace(/\bvideos?\b/gi, "")
+        .replace(/\bscenes?\b/gi, "")
         .replace(/\bwith this actress\b/gi, "")
         .trim()
 
-    if (stripped) {
-        parsed.q = stripped
+    const strippedTerms = stripped
+        .split(/\s+/)
+        .map((term) => term.trim())
+        .filter(Boolean)
+
+    const qTerms: string[] = []
+    for (const term of strippedTerms) {
+        if (STOP_WORDS.has(term)) {
+            continue
+        }
+
+        if (THEME_HINT_WORDS.has(term) || INTENSITY_HINT_WORDS.has(term)) {
+            parsed.includeTags?.push(term)
+            qTerms.push(term)
+            continue
+        }
+
+        qTerms.push(term)
     }
 
-    return parsed
+    if (qTerms.length) {
+        parsed.q = qTerms.join(" ")
+    }
+
+    return cleanParsedParams(parsed)
 }
 
 const parseModelJson = (output: string): LibrarySearchParams | null => {
-    const start = output.indexOf("{")
-    const end = output.lastIndexOf("}")
-    if (start === -1 || end === -1 || end <= start) {
-        return null
+    const candidates = [
+        output.trim(),
+        output.trim().replace(/^```json\s*/i, "").replace(/```$/i, "").trim(),
+    ]
+
+    for (const candidate of candidates) {
+        if (!candidate) {
+            continue
+        }
+
+        try {
+            const parsed = JSON.parse(candidate) as LibrarySearchParams
+            return cleanParsedParams(parsed)
+        } catch {
+            const start = candidate.indexOf("{")
+            const end = candidate.lastIndexOf("}")
+            if (start === -1 || end === -1 || end <= start) {
+                continue
+            }
+
+            try {
+                const parsed = JSON.parse(
+                    candidate.slice(start, end + 1)
+                ) as LibrarySearchParams
+                return cleanParsedParams(parsed)
+            } catch {
+                continue
+            }
+        }
     }
 
-    try {
-        const parsed = JSON.parse(output.slice(start, end + 1)) as LibrarySearchParams
-        return {
-            ...parsed,
-            includeTags: Array.isArray(parsed.includeTags) ? parsed.includeTags : [],
-            excludeTags: Array.isArray(parsed.excludeTags) ? parsed.excludeTags : [],
-            sort: parsed.sort ?? "relevance",
-        }
-    } catch {
-        return null
-    }
+    return null
 }
 
 const getOllamaTagsUrl = () => {
@@ -216,11 +328,12 @@ const maybeParseWithOllama = async (
             body: JSON.stringify({
                 model,
                 stream: false,
+                format: "json",
                 prompt: [
-                    "Convert the user's media-search request into JSON.",
-                    "Allowed keys: q, actress, studio, code, includeTags, excludeTags, yearFrom, yearTo, metadataStatus, sort.",
-                    "Keep it short and deterministic. Prefer includeTags for moods/themes.",
-                    "Return JSON only.",
+                    "Convert the user's media-search request into strict JSON for a local video search app.",
+                    'Allowed keys only: "q", "actress", "studio", "code", "includeTags", "excludeTags", "yearFrom", "yearTo", "metadataStatus", "sort".',
+                    'Use arrays for includeTags and excludeTags. If unknown, omit the key or return empty arrays.',
+                    'Return a single JSON object only. No markdown. No explanation.',
                     `User request: ${input}`,
                 ].join("\n"),
             }),
@@ -263,15 +376,55 @@ export const runNaturalLanguageSearch = async (
     input: string
 ): Promise<NaturalLanguageSearchResponse> => {
     const aiAttempt = await maybeParseWithOllama(input)
-    const parsed = aiAttempt.parsed ?? parseHeuristicQuery(input)
-    const result = searchLibrary(fastify, {
+    const heuristicParsed = parseHeuristicQuery(input)
+    const parsed = cleanParsedParams(aiAttempt.parsed ?? heuristicParsed)
+
+    let result = searchLibrary(fastify, {
         ...parsed,
         limit: parsed.limit ?? 24,
         offset: parsed.offset ?? 0,
     })
 
+    let finalParsed = parsed
+
+    if (!result.total) {
+        const candidateTerms = Array.from(
+            new Set([
+                ...(parsed.includeTags ?? []),
+                ...((parsed.q ?? "")
+                    .split(/\s+/)
+                    .map((term) => term.trim())
+                    .filter(Boolean)),
+            ])
+        )
+
+        const expandedTags = Array.from(
+            new Set(
+                candidateTerms.flatMap((term) => [
+                    term,
+                    ...findMatchingTags(fastify, term),
+                ])
+            )
+        )
+
+        if (expandedTags.length) {
+            finalParsed = cleanParsedParams({
+                ...parsed,
+                includeTags: Array.from(
+                    new Set([...(parsed.includeTags ?? []), ...expandedTags])
+                ),
+            })
+
+            result = searchLibrary(fastify, {
+                ...finalParsed,
+                limit: finalParsed.limit ?? 24,
+                offset: finalParsed.offset ?? 0,
+            })
+        }
+    }
+
     return {
-        parsed,
+        parsed: finalParsed,
         aiUsed: aiAttempt.aiUsed,
         interpretation: aiAttempt.aiUsed
             ? "Parsed with the local AI layer."

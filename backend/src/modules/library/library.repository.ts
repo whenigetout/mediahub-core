@@ -741,6 +741,41 @@ export const getLibrarySuggestions = (
         .map(({ score: _score, ...suggestion }) => suggestion)
 }
 
+export const findMatchingTags = (
+    fastify: FastifyInstance,
+    query: string
+): string[] => {
+    const normalized = normalizeSearchText(query)
+    if (!normalized) {
+        return []
+    }
+
+    const terms = splitSearchTerms(query)
+    const rows = fastify.db
+        .prepare(
+            `
+            SELECT DISTINCT tags
+            FROM library_item
+            WHERE is_available = 1
+              AND tag_text LIKE ?
+            LIMIT 200
+            `
+        )
+        .all(`%${normalized}%`) as Array<{ tags: string }>
+
+    const matched = new Set<string>()
+    for (const row of rows) {
+        for (const tag of parseJsonArray(row.tags)) {
+            const normalizedTag = normalizeSearchText(tag)
+            if (terms.every((term) => normalizedTag.includes(term))) {
+                matched.add(tag)
+            }
+        }
+    }
+
+    return Array.from(matched).sort((a, b) => a.localeCompare(b)).slice(0, 20)
+}
+
 const parsePresetParams = (value: string): LibrarySearchParams => {
     try {
         const parsed = JSON.parse(value) as LibrarySearchParams
